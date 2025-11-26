@@ -2,22 +2,10 @@
 # <font style="color:rgb(13, 18, 57);">AMem NCCL-Plugin: Transparent NCCL GPU Memory Offloading and Restoration</font>
 
 
-<font style="color:rgb(0, 0, 0);">In recent years, Reinforcement Learning (RL) has become the core technology driving the expansion of the large model frontier. From ChatGPT's RLHF, to the post-training systems of DeepSeek, Claude, and Llama, all rely on reinforcement learning to make models align better with human preferences and possess stronger reasoning capabilities.</font>
-
-<font style="color:rgb(0, 0, 0);">In October this year, </font>**<font style="color:rgb(0, 0, 0);">Ant Ling</font>**<font style="color:rgb(0, 0, 0);"> officially open-sourced two industry-leading trillion-parameter flagship models: the non-reasoning model </font>**<font style="color:rgb(0, 0, 0);">Ling-1T</font>**<font style="color:rgb(0, 0, 0);"> and the reasoning model </font>**<font style="color:rgb(0, 0, 0);">Ring-1T</font>**<font style="color:rgb(0, 0, 0);">. The training of a reasoning model on the massive scale of Ring-1T imposed extremely high demands on system engineering. This represents not just an algorithmic breakthrough, but a system engineering challenge that combines extreme technical depth and meticulous craftsmanship.</font>
-
-**<font style="color:rgb(0, 0, 0);">It's time for our weekly update!</font>**<font style="color:rgb(0, 0, 0);"> This marks the second installment in our carefully planned technical analysis series: </font>**<font style="color:rgb(0, 0, 0);">"ASystem System Open-Source,"</font>**<font style="color:rgb(0, 0, 0);"> which explores core technologies.</font>
-
-**<font style="color:rgb(0, 0, 0);">Today, we will unveil the second critical component in the ASystem stack:</font>**<font style="color:rgb(0, 0, 0);"> </font><font style="color:rgb(0, 0, 0);">AMem NCCL-Plugin. We will reveal how we resolve GPU memory bottlenecks and the time-consuming challenge of communication connection in RL training to achieve high-performance computing.</font>
-
-<font style="color:rgb(0, 0, 0);">Please continue to follow our official account. Over the coming weeks, we will continue to release technical analyses of several more system-level key components—each installment is well worth the wait!</font>
-
-
 
 
 
 ## <font style="color:rgb(37, 39, 42);">TL；DR </font><font style="color:rgb(13, 18, 57);">Technical Overview</font>
-<font style="color:rgb(13, 18, 57);">This week, we continue sharing another key component of the ASystem series: </font>**<font style="color:rgb(13, 18, 57);">AMem NCCL-Plugin</font>**<font style="color:rgb(13, 18, 57);">.</font>
 
 **<font style="color:rgb(13, 18, 57);">NCCL</font>**<font style="color:rgb(13, 18, 57);"> </font><font style="color:rgb(13, 18, 57);">stands for NVIDIA Collective Communications Library. It is the core communication library for multi-GPU and multi-node distributed deep learning, providing highly efficient collective communication operations such as AllReduce and Broadcast.</font>
 
@@ -32,7 +20,7 @@
 
 | System | Solution | Memory Saved | Per-step Offload/Reload Time |
 | --- | --- | --- | --- |
-| **Slime**<sup>****</sup> | <font style="color:rgb(13, 18, 57);">Clean NCCL GPU memory by destroying and recreating the training engine's communication group</font> | Inference: No saving (2 GB left)<br/>Training: Saves 10 GB+ | Several minutes |
+| **Slime** | <font style="color:rgb(13, 18, 57);">Clean NCCL GPU memory by destroying and recreating the training engine's communication group</font> | Inference: No saving (2 GB left)<br/>Training: Saves 10 GB+ | Several minutes |
 | **Verl, OpenRLHF** | <font style="color:rgb(13, 18, 57);">Does not support offloading NCCL GPU memory</font> | Inference: No saving (2 GB left)<br/>Training: No saving (10 GB+ left) | 0s |
 | **AMem** | <font style="color:rgb(13, 18, 57);">Offload and restore NCCL GPU memory via Plugin</font> | Inference: Saves 2 GB<br/>Training: Saves 10 GB+ | <1s |
 

@@ -1,6 +1,5 @@
 # AMem NCCL-plugin：透明 NCCL 显存卸载和恢复
 ## <font style="color:rgb(37, 39, 42);">TL；DR 技术概述</font>
-<font style="color:rgb(37, 39, 42);">本周继续为大家分享 ASystem 系列组件的另一关键组件：AMem NCCL-Plugin。</font>
 
 <font style="color:rgb(37, 39, 42);">NCCL 是 NVIDIA Collective Communications Library（英伟达集合通信库）的缩写，它是多 GPU 和多节点分布式深度学习的核心通信库，提供了包括 AllReduce、Broadcast 等多种高效集体通信操作。</font>
 
