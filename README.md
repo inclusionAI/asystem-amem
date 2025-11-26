@@ -121,7 +121,7 @@ _Figure 6: Process and Memory State Transitions_
 ### Guarantee 3: Workflow Guarantee – Distributed Offload & Restore
 Using built-in UDS communication, AMem ensures correct cross-process P2P reference tracing, metadata updates, and redo execution—even in distributed settings (Figure 7). Note: Multi-rank systems are peer-to-peer; the diagram only shows rank0’s perspective for clarity.
 
-![](./docs/images/workflow.webp)
+![](./docs/images/workflow.png)
 
 _Figure 7: Distributed NCCL Memory Offload & Restore Workflow_
 
