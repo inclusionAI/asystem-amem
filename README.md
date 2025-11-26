@@ -1,109 +1,238 @@
-# AMem NCCL-plugin: NCCL memory transparent release and restore
 
-## Overview
-AMem NCCL-plugin is an NCCL extension library developed by Ant Group's Asystem team. Through a two-layer architecture and lightweight hooks, it achieves transparent release and restoration of NCCL GPU memory for the first time.  With large-scale reinforcement learning training scenarios, it could save up to 10~20GB of memory per card. It's already deplopyed with [Ring-1T](https://arxiv.org/abs/2510.18855) RL training.
-
-Key features:
-+ **NCCL distributed memory live release and resume**: resolves cross-rank memory cross-reference, achieving transparent memory release and restoration.
-+ **Compatibility**: supports all NCCL parallelisms and mainstream GPUs (based on NCCL 2.27), integrated and verified with SGLang and Megatron. 
-+ **Efficiency**: memory release can be done at a near-constant time, usually <1 second.
-
-
-Below is a brief comparison:
-
-| | NCCL | Slime | verl, AReal, openRLHF | AMem |
-| --- | --- | --- | --- | --- |
-| Live offload | <font style="color:#DF2A3F;">N</font> | <font style="color:#DF2A3F;">N</font>*<br/>restart process at the cost of communication rebuild overhead, potentially a few minutes. | <font style="color:#DF2A3F;">N</font> | Y<br/> |
- && \
+# AMem NCCL-Plugin: Transparent NCCL GPU Memory Offloading and Restoration
 
 
 
-![](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/189864/1760150373401-663981e7-5f67-4375-9d09-abbd173da074.png)        ![](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/189864/1760150400495-2eabb3bc-4c0a-4605-9a36-21d0436eae49.png)
 
-Figure 1: AMem NCCL-plugin could  completely release NCCL allocated memory
 
-+ CUDA context memory is out of release scope (typically ~800MB), which is shared with the training/rollout process.
-+ The initial offloading may be a bit slow (because of the allocation of the CPU pinned buffer), subsequent offload is fast usually <1 second.
-+ By default, all NCCL explicitly allocated memory is offloaded to CPU. P2P buffer memory is configurable to be released without offloading, significantly reducing the time.
+## TL；DR Technical Overview
 
-### Challenges
+**NCCL** stands for NVIDIA Collective Communications Library. It is the core communication library for multi-GPU and multi-node distributed deep learning, providing highly efficient collective communication operations such as AllReduce and Broadcast.
 
-Compared to memory offloading in Python, NCCL's transparent memory release faces additional challenges:
-1. NCCL is implemented in C/C++, independent of the PyTorch, and is not supported by existing Python-based solutions.
-2. **Distributed P2P memory cross-referencing**: In particular, unlike sharding data like weights etc., NCCL is designed for collective communication, introducing complex cross-rank, dynamic P2P reference in multi-GPU environments. Essentially, this involves a unique distributed memory cross-referencing problem, prone to memory leak.
-3. **Complex logic **due to dynamic NCCL init, 3D/4D hybrid parallelism etc: may hit crashes or hangs.
+**AMem NCCL-Plugin** is a self-developed NCCL extension library by Ant Group’s ASystem team. It introduces two memory management APIs—`ncclPause()` and `ncclResume()`—to address a critical challenge in reinforcement learning (RL) workflows: the inability to efficiently offload GPU memory allocated by the NCCL communication library. Through a lightweight plugin approach, AMem enables transparent offloading and restoration of NCCL memory used by training/inference engines while preserving existing NCCL communication connections<sup>1</sup>. These advantages have already been validated in RL training for **Ring-1T, a trillion-parameter model**.
 
-### Design
+The benefits of AMem NCCL-Plugin are demonstrated in two key aspects:
 
-AMem NCCL-Plugin, built upon CUDA VMM API, employs a two-layer decoupling scheme to achieve transparent GPU memory release and restoration.
-● **Upper layer "NCCL Hook"**: NCCL codes are slightly modified just to extract memory metadata information (allocation, release, export etc).The core logic of NCCL remains unchanged, making upgrade or patch easy.
-● **Core layer "AMem Plugin"**: The core logics are implemented in a separate library, including:
-○ **Metadata management**: such as memory address, reference information, current status, etc.
-○ **Distributed reference and release**: enables dynamic tracing across processes and ranks.
-○ **Distributed resume**: redo based on metadata, e.g. cross-rank re-export and mapping.
-○ **Process group (PG)**: cross-process metadata is exchanged through an internal Unix Domain Socket (UDS) system; Different tasks like training and rollout processes are logically seperated with a unique groupID to correctly identify references and avoid erroneous operations.
++ **Memory Savings**: By identifying and resolving cross-rank GPU memory cross-references within the NCCL communication library, AMem correctly implements transparent memory release and restoration. During transitions between training and inference, it can free over 10 GB of GPU memory per card (Hopper architecture) while maintaining communication group connectivity.
++ **Extreme Efficiency**: Since communication group connections are preserved, switching between training and inference only requires offloading and restoring NCCL metadata—no need to rebuild communication connections (which typically takes minutes). This reduces typical transition latency from minutes to **under 1 second**.
 
-![](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/189864/1760162230824-512f8c55-c062-42d7-832a-0f4d610be057.png?x-oss-process=image%2Fformat%2Cwebp)
+Comparison with Community Solutions on Hopper Architecture GPUs:
 
-Figure 2：AMem NCCL-plugin architecture
+| System | Solution | Memory Saved | Per-step Offload/Reload Time |
+| --- | --- | --- | --- |
+| **Slime** | Clean NCCL GPU memory by destroying and recreating the training engine's communication group | Inference: No saving (2 GB left)<br/>Training: Saves 10 GB+ | Several minutes |
+| **Verl, OpenRLHF** | Does not support offloading NCCL GPU memory | Inference: No saving (2 GB left)<br/>Training: No saving (10 GB+ left) | 0s |
+| **AMem** | Offload and restore NCCL GPU memory via Plugin | Inference: Saves 2 GB<br/>Training: Saves 10 GB+ | <1s |
 
-Built on internal UDS communication, the overall NCCL memory release and resume routines are shown in Figure 3, e.g., cross-process P2P reference tracing, metadata updates, and redo .
-+ Multi-rank essentially is a peer-to-peer relationship; the figure shown here only illustrates the core process from the perspective of rank 0.
 
-![](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/189864/1760160197422-3cd52022-e09c-40ee-b547-b51bfbf48c86.png?x-oss-process=image%2Fformat%2Cwebp)
+_Figure 1: Functional comparison of AMem NCCL-Plugin._
 
-Figure 3: AMem NCCL-plugin distributed memory release and recovery routine
+_**Note 1**:_
 
-## Installation
++ _**Memory Release**: Returning GPU memory back to the OS._
++ _**Memory Offload**: Moving data from GPU memory into CPU pinned buffers, then releasing GPU memory._
++ _**Memory Restore**: Reallocating GPU memory and copying data back from CPU pinned buffers._
 
-AMem NCCL-plugin has three outputs: extended nccl.h, libnccl.so.2 (with our hook) and libamem_nccl.so
-+ It keeps all NCCL existing functionalities while extends with the following new APIs: transparent GPU memory release and resume, internal GPU memory stats (e.g., memory usage for P2P)
+## Background Challenges
+**Co-location Deployment in Reinforcement Learning**:  
+In typical RL systems using co-located training and inference on the same GPU, after completing one task, GPU resources must be quickly and cleanly released for subsequent tasks to improve resource efficiency. While GPU compute units are stateless and can be released immediately after use, GPU memory is stateful—requiring careful management. For example:
+
++ Critical data must first be saved to host memory before freeing GPU memory.
++ When restoring, this data must be copied back accurately.
+
+This poses significant technical challenges involving memory allocation, cross-process references, and state restoration.
+
+**GPU Memory Management Complexity**:  
+CUDA provides multiple memory management APIs. To release GPU memory while keeping processes alive, Virtual Memory Management APIs (VMM or cuMem) must be used. These APIs offer two-layer address management and dynamic mapping capabilities (see Figure 2). Modern frameworks like PyTorch and NCCL already support optional VMM-based memory allocation.
+
+![](./doc/vmm_api_ops.png)
+
+_Figure 2: NVIDIA VMM Memory Management APIs and Typical Operations_
+
+During memory management, all memory allocations must be traced. User-space allocations can generally be managed precisely. In RL scenarios, typical memory content requiring offloading includes:
+
++ **Training**: Weights, optimizer states, activations, NCCL memory, CUDA graphs, etc.
++ **Inference**: Weights, KV cache, activations, NCCL memory, CUDA graphs, etc.
+
+While the community has made initial progress managing most memory types, **NCCL memory remains a notable gap**.
+
+**Challenges in Offloading NCCL Memory**:  
+NCCL does not expose external interfaces for managing its allocated GPU memory, making it difficult to control. Common approaches include:
+
+1. **Not releasing NCCL memory**: As shown in Figure 1, NCCL memory may occupy 10–20 GB, significantly limiting batch size—critical for throughput-intensive RL workloads. This approach avoids connection setup overhead per RL step.
+2. **Destroying and recreating training/inference processes or communication groups**: This cleanly releases memory but incurs high initialization costs (typically minutes), though recent optimizations (e.g., from Meta) show potential.
+
+Both approaches involve trade-offs: the first sacrifices memory for speed; the second trades time for memory. Our research focuses on achieving **both**.
+
+## Technical Challenges
+Compared to memory offloading in PyTorch/Python, transparent NCCL memory offloading faces three main challenges:
+
+1. **NCCL is implemented in C/C++**, operating outside PyTorch’s memory pool—existing Python-based solutions don’t apply.
+2. **Distributed P2P Memory Cross-References**: Unlike per-rank data (e.g., sharded weights, activations, KV cache), NCCL creates complex cross-rank P2P references for collective communication. Simply freeing local memory doesn’t release resources to the driver. Over multiple rounds, unreleased old buffers accumulate, causing NCCL memory usage to grow. This unique **distributed memory cross-reference problem** requires precise restoration—any mismatch risks crashes or hangs.
+3. **Complex Logic from Dynamic Connections & Hybrid Parallelism**: NCCL is hard to modify, and corner cases are numerous during validation. For example, NVIDIA’s 2024 **symmetric memory** (for NVSwitch-based high-speed collectives) introduces even more complex memory management logic (see Figure 3).
+
+![](./doc/sym_mem.webp)
+
+![](./doc/nv_switch.png)
+
+_Figure 3: NVIDIA Symmetric Memory–Related APIs_
+
+## Solution Design
+AMem NCCL-Plugin leverages CUDA’s VMM APIs and employs a clean two-layer decoupled design to ensure **threefold guarantees** for transparent NCCL memory offloading and restoration.
+
++ **Interface Coupling Layer—NCCL Hook**: Minimal NCCL code modifications—only a few memory-related operations (allocation, deallocation, mapping) are altered. Preserves NCCL’s core logic, enabling:
+    - Easy patching during NCCL upgrades.
+    - Simple integration via a few AMem metadata management APIs.
++ **Functional Decoupling Layer—AMem Plugin**: Encapsulated in a standalone library (`libamem_nccl.so`), independent of NCCL source code. Key functions include:
+    - **Metadata Management**: Tracks memory addresses, reference counts, and current states.
+    - **Distributed Reference Identification & Offload**: Dynamically traces cross-process and cross-rank references.
+    - **Distributed Resume**: Executes precise redo operations based on metadata, including cross-process/rank re-exporting and remapping.
+    - **Process Group Communication**: Uses Unix Domain Sockets (UDS) to pass file descriptors across processes. Logical grouping of training/inference processes ensures correct reference tracking and prevents misoperations—inspired by our open-source project [**GLake**](https://github.com/antgroup/glake).
+
+
+
+![](./doc/overall_arch.webp)
+
+_Figure 4: Overall Architecture of AMem NCCL-Plugin_
+
+### Guarantee 1: Traceability via Cross-Reference Metadata
+Figure 5 illustrates how a process exports its NCCL P2P buffer (handle0) to multiple peers via VMM APIs. If each process frees its local address without waiting for peers, memory isn’t returned to the system.
+
+AMem dynamically tracks **“which peers reference a given handle”**, ensuring:
+
++ **No missed releases** during offload.
++ **Exact restoration** during reload.
+
+For co-located deployment (training + inference on the same GPU), identical virtual addresses may appear in different processes, risking metadata conflicts. To resolve this, AMem introduces a **Group concept** to distinguish allocations across process groups.
+
+
+
+![](./doc/p2p_mem_ref.png)
+
+_Figure 5: NVIDIA P2P Memory Cross-Reference and Handling (simplified multi-GPU example)_
+
+### Guarantee 2: State Management
+AMem maintains and updates internal states for each process and NCCL memory allocation (`dptr`), ensuring completeness and real-time accuracy (Figure 6).
+
+![](./doc/process_status.webp)
+
+_Figure 6: Process and Memory State Transitions_
+
+### Guarantee 3: Workflow Guarantee – Distributed Offload & Restore
+Using built-in UDS communication, AMem ensures correct cross-process P2P reference tracing, metadata updates, and redo execution—even in distributed settings (Figure 7). Note: Multi-rank systems are peer-to-peer; the diagram only shows rank0’s perspective for clarity.
+
+![](./doc/workflow.webp)
+
+_Figure 7: Distributed NCCL Memory Offload & Restore Workflow_
+
+### Summary & Results
+AMem NCCL-Plugin can **nearly fully offload NCCL-allocated GPU memory** and restore it on demand<sup>2</sup>, **without rebuilding NCCL communication groups**. The amount of offloadable memory depends on:
+
++ Cluster scale
++ Number of collective communication groups<sup>3</sup> (especially AlltoAll)
++ Parallel strategy (typically 3D–5D)
++ CUDA/NCCL version
+
+In large-scale tasks, NCCL memory overhead can reach **10–20 GB per GPU**. With AMem, restoration latency is typically **under 1 second**<sup>**4**</sup>.
+
+![](./doc/result1.webp)        ![](./doc/result2.webp)
+
+_Figure 8: AMem NCCL-Plugin nearly fully offloads NCCL memory (left/right: different GPU types)_
+
+_**Note 2**: CUDA context memory (~800 MB) is __**not offloaded**__, as it’s shared between training/inference processes._
+_**Note 3**: Common collective communication primitives include: Broadcast, Scatter, Gather, Reduce, AllGather, AllReduce, ReduceScatter, AlltoAll, etc._
+
+_**Note 4**: First offload is slower (due to CPU pinned buffer allocation); subsequent operations take <1 sec. CPU pinned buffers store NCCL metadata and connection info; user-allocated GPU memory is fully released._
+
+## Getting Started: Installation & Compilation
+### Code Artifacts
+AMem NCCL-Plugin produces three files:
+
++ Extended `nccl.h`
++ `libnccl.so.2`
++ `libamem_nccl.so`
+
+It extends NCCL with new APIs for transparent memory offload, restore, and usage statistics—**without altering existing functionality**.
 
 ```c
-/*
- * NCCL Pause()/Resume() APIs by AMem NCCL-plugin that release (then re-alloc) phy GPU memory while keeping dptr unchanged
- * Pause(): offload (P2P buffer is optional) then release phy addr including references from peer, virtual dptr keep intact
- * Resume(): basically redo, e.g., alloc new phy addr, remap to existing dptr, preload data, notifer peer etc, thus everything is restored
- * Notes:
- * - both APIs are blocked until all release/offload/preload run to complete
- * - APIs shall be invoked in-order and in-pair e.g. Pause() then Resume()
- * - for inter-GPU state consistency, it shall be handled by caller frameworks like SGLang, Megatron-LM etc
- * - input argument comm currently is unused, just set as NULL
- */
-ncclResult_t ncclPause(ncclComm_t * comm = NULL);
-ncclResult_t ncclResume(ncclComm_t* comm = NULL);
-ncclResult_t ncclMemStats();
-ncclResult_t ncclSetGroupID(int id);
-ncclResult_t ncclGetGroupID(int* id);
+///// The following 5 new APIs have been added to nccl.h
 
-# Logic process groups to correctly track reference and avoid mis operation
-# e.g., each training process shall set and share ID, different with rollout
-# 100 for actor process on GPU0, 1...7
-# 200 for rollout process on GPU0, 1...7
+// Each process must explicitly call ncclPause(). Upon return, 
+// the GPU memory on this device has been fully released, 
+// and the reference count from this device to memory on other devices is decremented by 1.
+//
+// Notes:
+// 1. ncclPause() and ncclResume() are synchronous calls. 
+//    After calling ncclPause(), no further NCCL operations should be invoked; 
+//    otherwise, crashes, hangs, or invalid memory accesses may occur.
+// 2. ncclPause() and ncclResume() must be used in matched pairs and called in order. 
+//    It is the user's responsibility to ensure this; otherwise, the calls may be ineffective or cause errors.
+// 3. The caller is responsible for maintaining state consistency across multiple GPUs. 
+//    For example, all GPUs must complete ncclResume() before NCCL operations can safely resume.
+ncclResult_t ncclPause(ncclComm_t* comm = NULL);
+ncclResult_t ncclResume(ncclComm_t* comm = NULL);
+
+// Reports total NCCL GPU memory allocation and which functions triggered the allocations.
+ncclResult_t ncclMemStats();
+
+// When multiple processes coexist on the same GPU, they can explicitly assign a group ID 
+// to indicate they belong to the same logical group. AMem uses this ID to correctly trace 
+// memory references and avoid cross-group interference. For example:
+//   - Training processes on GPUs 0–7 each explicitly call this API with group ID 100.
+//   - Inference processes on GPUs 0–7 each explicitly call this API with group ID 200.
+// This group ID must be set BEFORE the first NCCL memory allocation; otherwise, it will have no effect.
 ncclResult_t ncclSetGroupID(int id);
 ncclResult_t ncclGetGroupID(int* id);
 ```
 
-Requirements:
+#### Requirements
++ NVIDIA GPU with compute capability ≥ sm80
++ Recommended: CUDA ≥ 12.2
 
-1. NVIDIA GPU >= sm_80.  Functions are tested on 80/90/100
-2. Recommend CUDA >=12.2
-+ essentially it leverages NVIDIA[ Virtual Memory Management APIs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html) (introduced on CUDA 10.2, or so-called cuMem) for transparent GPU memory release then remap.
+<font style="color:#000000;">First compilation takes ~10 minutes; see README for details.
 
-Build steps: 
-
-```bash
+#### Build Steps
+```yaml
 # Recommend docker nvcr.io/nvidia/pytorch:25.08-py3
-cd amem/ 
+cd asystem-amem/ 
 
 git submodule init
 git submodule update
 ./build.sh
-
 ```
 
-## Try it
-Below shows tests using [nccl-test](https://github.com/NVIDIA/nccl-tests)（allreduce，allgather, alltoall, etc). 
+**NCCL Memory Statistics** (independent of pause/resume): call `ncclMemStats()`
+
+```bash
+AMEM groupID:170 pid:197780 caller_1 allocBytes:3024093184
+AMEM groupID:170 pid:197780 caller_3 allocBytes:201326592
+AMEM groupID:170 pid:197780 caller_7 allocBytes:2818572288
+AMEM groupID:170 pid:197780 total allocBytes:6043992064 (5764 MB)
+```
+
+#### Key Environment Variables
+```bash
+NCCL_ENABLE_CUMEM=1    # Required: enable NCCL CUMEM
+AMEM_ENABLE=1          # Enable NCCL memory offload/restore
+AMEM_GROUPID=xxx       # Assign distinct group IDs for training/inference processes
+```
+
+<font style="color:#000000;">When integrating with RL frameworks, pass these variables to Ray or the training/inference framework.
+
+#### Optional Environment Variables
+```bash
+AMEM_NCCL_OFFLOAD_FREE_TAG=7  # Directly free P2P buffers without CPU offload
+GMM_LOG=3                     # Log level (default: 3/INFO; max: 5)
+```
+
+### Unit Testing
+Based on `nccl-tests`, validate dynamic memory offload/restore under typical parallel patterns (AllReduce, AllGather, AlltoAll, etc.).
+
++ Framework-independent
++ Takes ~10 minutes post-compilation
++ Requires minor modifications: insert calls to `ncclPause()`/`ncclResume()`
+
+Original tests: [<font style="color:rgb(94, 92, 230);">https://github.com/NVIDIA/nccl-tests](https://github.com/NVIDIA/nccl-tests)
 
 ```bash
 # Run quick tests about nccl mem offloading/resume
@@ -111,111 +240,32 @@ export MPI_HOME=your/openmpi/home
 bash ./run.sh
 ```
 
-** Typical running logs**
+Test run example：
 
-```bash
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197780 allocSz:67108864 curDev:2 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:3621d20 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197805 allocSz:67108864 curDev:7 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:4a73d60 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197783 allocSz:67108864 curDev:5 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:3c05b30 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197779 allocSz:67108864 curDev:1 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:43b71d0 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197781 allocSz:67108864 curDev:3 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:3c58cc0 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197793 allocSz:67108864 curDev:6 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:32d3880 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197782 allocSz:67108864 curDev:4 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:32c9100 rmtHandle:0 caller:3
-AMEM [INFO] amem_nccl.cpp:amem_addAllocInfo:102 groupID:170 pid:197778 allocSz:67108864 curDev:0 peer:-1 (detected:-1) dptr:a02000000 type:local localHandle:379f840 rmtHandle:0 caller:3
-#
-#                                                              out-of-place                       in-place          
-#       size         count      type   redop    root     time   algbw   busbw #wrong     time   algbw   busbw #wrong
-#        (B)    (elements)                               (us)  (GB/s)  (GB/s)            (us)  (GB/s)  (GB/s)       
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197781 GPU:3 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197783 GPU:5 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197805 GPU:7 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197778 GPU:0 memUsed: 4364 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197782 GPU:4 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197780 GPU:2 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197793 GPU:6 memUsed: 4042 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197779 GPU:1 memUsed: 4042 MB before paused
+![](./doc/run_result.webp)
 
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197778 GPU:0 pauseCnt:1 mem:1294 MB after paused, released:3076 MB, duration:11476 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197780 GPU:2 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11522 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197782 GPU:4 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11524 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197793 GPU:6 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11534 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197805 GPU:7 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11559 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197779 GPU:1 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11591 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197781 GPU:3 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11663 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197783 GPU:5 pauseCnt:1 mem:972 MB after paused, released:3076 MB, duration:11764 ms offload:549 releaseLocal:448 releasePeer:448
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197780 GPU:2 resumeCnt:1 mem:4048 MB after resumed, duration:16697 ms offloadLeft:0 releaseLocalLeft:0 releasePeerLeft:0 exportSz:2688
+### Framework Integration
+AMem NCCL-Plugin **does not affect normal NCCL usage** but adds new APIs:
 
-    67108864       2097152     float    none      -1   3551.8   18.89   16.53      0    676.9   99.15   86.75    N/A
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197779 GPU:1 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197805 GPU:7 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197783 GPU:5 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197781 GPU:3 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197782 GPU:4 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197780 GPU:2 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197778 GPU:0 memUsed: 4370 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:335 groupID:170 pid:197793 GPU:6 memUsed: 4048 MB before paused
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197782 GPU:4 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:820 ms 
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197793 GPU:6 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:848 ms 
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197805 GPU:7 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:882 ms 
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197780 GPU:2 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:904 ms
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197779 GPU:1 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:971 ms
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197778 GPU:0 pauseCnt:3 mem:1294 MB after paused, released:3076 MB, duration:971 ms
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197781 GPU:3 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:971 ms
-AMEM [INFO] amem_nccl.cpp:amem_memPause:395 groupID:170 pid:197783 GPU:5 pauseCnt:3 mem:972 MB after paused, released:3076 MB, duration:987 ms
++ `ncclPause()`: Synchronously releases NCCL-allocated GPU memory in the current process.
++ `ncclResume()`: Synchronously restores all memory previously released by `ncclPause()`.
++ `ncclSetGroupID()`: Sets a process group ID for the current process.
++ `ncclMemStats()`: Reports NCCL memory usage and breakdown.
 
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197780 GPU:2 resumeCnt:3 mem:4048 MB after resumed, duration:14810 ms 
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197805 GPU:7 resumeCnt:3 mem:4048 MB after resumed, duration:15452 ms
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197781 GPU:3 resumeCnt:3 mem:4048 MB after resumed, duration:15428 ms
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197779 GPU:1 resumeCnt:3 mem:4048 MB after resumed, duration:15533 ms 
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197782 GPU:4 resumeCnt:3 mem:4048 MB after resumed, duration:15865 ms offloadLeft:0 releaseLocalLeft:0 releasePeerLeft:0 exportSz:2688
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197783 GPU:5 resumeCnt:3 mem:4048 MB after resumed, duration:15887 ms offloadLeft:0 releaseLocalLeft:0 releasePeerLeft:0 exportSz:2688
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197778 GPU:0 resumeCnt:3 mem:4370 MB after resumed, duration:16270 ms offloadLeft:0 releaseLocalLeft:0 releasePeerLeft:0 exportSz:2688
-AMEM [INFO] amem_nccl.cpp:amem_memResume:497 groupID:170 pid:197793 GPU:6 resumeCnt:3 mem:4048 MB after resumed, duration:16429 ms offloadLeft:0 releaseLocalLeft:0 releasePeerLeft:0 exportSz:2688
+Additional Notes:
 
-AMEM groupID:170 pid:197780 caller_1 allocBytes:3024093184
-AMEM groupID:170 pid:197780 caller_3 allocBytes:201326592
-AMEM groupID:170 pid:197780 caller_7 allocBytes:2818572288
-AMEM groupID:170 pid:197780 total allocBytes:6043992064 (5764 MB)
++ `ncclPause`/`ncclResume` are **idempotent** (safe for repeated calls).
++ The framework must ensure **cross-process synchronization** so all ranks complete offload/restore.
++ Supports **multiple communication groups** per process (e.g., 3D/4D parallelism).
++ If only one task runs at a time (e.g., inference-only or training-only), `groupID` is unnecessary.
 
-# Out of bounds values : 0 OK
-# Avg bus bandwidth    : 51.6429 
-```
+#### PyNCCL Integration
+Many upper-layer applications (e.g., SGLang, vLLM) use **PyNCCL**—a Python wrapper that loads NCCL’s dynamic library and exposes APIs via function handles.
 
-****
+#### SGLang Example
+Modify `pynccl` and `pynccl_wrapper` to load the three new function handles. ( `ncclComm` parameter can be set to NULL. )
 
-**Import configs：**
-
-+ NCCL_ENABLE_CUMEM=1  #cuMem must be enabled, it's env from NCCL
-+ AMEM_ENABLE=1 # >=1 to eanble NCCL Mem offloading
-+ AMEM_GROUPID=xxx  # Unique ID for actor or rollout 
-
-**Optional configs:**
-
-+ AMEM_NCCL_OFFLOAD_FREE_TAG=7 # Skip P2P buffer offload for fast speed
-+ GMM_LOG:  default 3（INFO). Set at most as 5 for more log info
-
-## Integration with frameworks
-AMem NCCL-plugin expands NCCL interfaces with new features:  
--	`ncclPause()`: Releases the GPU memory allocated by NCCL in the current process, executed synchronously.  
--	`ncclResume()`: Restores all GPU memory released by the previous `pause`, executed synchronously.  
--	 `ncclSetGroupID()`: Sets the process logical groupID for the current process.  
--	 `ncclMemStats()`: Statistics on the amount of GPU memory used and the category of NCCL in the current process.  
-
-
-Additional Notes:  
--	Both `ncclPause` and `ncclResume` are idempotent, meaning they may be called multiple times without side-effect.  
--	The framework shall handle necessary cross-rank synchronization, such as wait until all ranks complete ncclPause() and ncclResume().  
--	Supports multiple communication groups created by a process (e.g., for 3D/4D parallelisms).  
--	If only one task, e.g, rollout or training only, no additional ncclSetGroupID() is required.
-
-
-
-### pynccl
-Many high-level applications like SGlang and vLLM, support the pynccl interfaces which wrap NCCL lib into a Python interface, opens the API function handles, then calls it through Python. The following example demonstrates how SGlang calls pynccl.
-
-Simple modifications of pynccl and pynccl_wrapper classes are required. Below we demo the code for modifying pynccl_wrapper to load the new NCCL APIs (note that the parameter ncclComm can be set to NULL):
-
-```bash
+```python
 # ncclResult_t ncclPause(ncclComm_t comm);
 Function("ncclPause", ncclResult_t, [ncclComm_t]),
 # ncclResult_t ncclResume(ncclComm_t comm);
@@ -223,9 +273,9 @@ Function("ncclResume", ncclResult_t, [ncclComm_t]),
 Function("ncclSetGroupID", ncclResult_t, [ctypes.c_int]),
 ```
 
-When need to release NCCL memory, refer to the following code example:
+**To offload NCCL memory:**
 
-```bash
+```python
 from sglang.srt.distributed.parallel_state import get_tensor_model_parallel_group
 
 tp_group = get_tensor_model_parallel_group().pynccl_comm
@@ -233,9 +283,9 @@ if tp_group.nccl.enable_amem_nccl:
     tp_group.nccl_pause()
 ```
 
-When need to restore NCCL memory, refer to the following code example:
+**To restore NCCL memory:**
 
-```bash
+```python
 from sglang.srt.distributed.parallel_state import get_tensor_model_parallel_group
 
 tp_group = get_tensor_model_parallel_group().pynccl_comm
@@ -243,41 +293,71 @@ if tp_group.nccl.enable_amem_nccl:
     tp_group.nccl_resume()
 ```
 
-### Megatron
-Since Megatron does not use pynccl, the following integration is recommended:
+#### Megatron Integration
+Since Megatron doesn’t use PyNCCL:
 
-1. Install the AMem enabled SGlang version integrated in the image.
-2. Initialize a pynccl object when initializing the Megatron instance.
-3. Explicitly call the new APIs as needed.
+1. Introduce a PyNCCL-like class in Megatron code.
+2. Initialize a PyNCCL object during Megatron instance setup.
+3. Explicitly call offload/restore functions as in the SGLang example.
 
+#### RL Framework Integration
+RL frameworks combine training and inference components. Integration depends on deployment mode:
 
++ **Separate Training/Inference**: Follow SGLang/Megatron integration.
++ **Co-located Deployment**: Set distinct `groupID`s for training and inference process groups. During initialization:
+    - Training process group: call `ncclSetGroupID(group_id_train)`
+    - Inference process group: call `ncclSetGroupID(group_id_infer)`
++ Other usage follows previous guidelines.
 
-### RL
-RL framework involves a training framework and rollout framework. Depending on the deployments, there are two integration methods:
+## Future Roadmap
+Memory management and optimization require sustained investment. For legacy-compatible libraries like NCCL, continuous iteration and meticulous engineering are essential. Community collaboration and diverse real-world validations will further drive improvements.
 
-+ If training and rollout are deployed separately, refer to the SGLang and Megatron integration methods described above.
-+ For co-located deployment, groupID needs to be set to distinguish between training and inference process groups. When the training process group is initialized, `ncclSetGroupID` is called to set a groupID; when the rollout process group is initialized, a different groupID shall be set. After that, just refer to above examples.
+#### Short-Term Plans:
++ Support NCCL 2.28
++ Engage with NCCL community on future evolution
++ Develop targeted test cases for symmetric memory
 
-## Code structure
-Current implementation is based on NCCL 2.27.5 (June 2025).
+#### Mid-to-Long-Term Plans:
++ Apply AMem practices to next-gen hardware
++ Optimize for agentic AI scenarios
++ Explore deep integration of communication and memory management for acceleration
 
-+ **nccl_master**: modified nccl source code with AMem hook, AMem plugin core logics
-    - amem_nccl_plugin/: core logics, internal cross-rank/cross-process unix domain socket 
-        * amem_nccl.h, amem_nccl.cpp: metadata magt, pause, resume, stats
-        * gmm*: internal unix domain socket, logical process group support. Most of those codes are refactored based on our another open-source project [GLake](https://github.com/antgroup/glake)
-+ **nccl-tests**: NVIDIA nccl-tests with AMem ncclPause(), ncclResume() example
-    - src/common.cu: run with ncclPause()/Resume()/MemStats()
-+ **nccl_patch**: code change diff vs. original nccl-2.27.5 and nccl-tests
-
-## Roadmap
-- [ ] Support NCCL 2.28
-- [ ] More tests on symm mem
-
-and welcome contributions and integrations 
-
-## Reference
-+ AntGroup Ling team. Every Step Evolves: Scaling Reinforcement Learning for Trillion-Scale Thinking Model, [https://arxiv.org/abs/2510.18855](https://arxiv.org/abs/2510.18855)
-+ GLake: [https://github.com/antgroup/glake](https://github.com/antgroup/glake) or GMLake ASPLOS24 [https://dl.acm.org/doi/abs/10.1145/3620665.3640423](https://dl.acm.org/doi/abs/10.1145/3620665.3640423) 
+## References
++ Every Step Evolves: Scaling Reinforcement Learning for Trillion-Scale Thinking Model, [https://arxiv.org/abs/2510.18855](https://arxiv.org/abs/2510.18855)
++ GLake: [https://github.com/antgroup/glake](https://github.com/antgroup/glake) or ASPLOS24  [https://dl.acm.org/doi/abs/10.1145/3620665.3640423](https://dl.acm.org/doi/abs/10.1145/3620665.3640423) 
 + Zhiyi Hu, Siyuan Shen, Tommaso Bonato, Sylvain Jeaugey, Cedell Alexander, Eric Spada, James Dinan, Jeff Hammond, Torsten Hoefler.Demystifying NCCL: An In-depth Analysis of GPU Communication Protocols and Algorithms, arXiv preprint arXiv:[2507.04786](https://arxiv.org/abs/2507.04786)
-+ NVIDIA. NCCL 2.27. [https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.](https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.) Accessed: 2025-10-10
-+ Xiaolin Zhu. Slime V0.1.0. [https://zhuanlan.zhihu.com/p/1945237948166547268](https://zhuanlan.zhihu.com/p/1945237948166547268). Accessed: 2025-10-10
++ NVIDIA. NCCL 2.27. [https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.](https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.)Accessed: 2025-10-10
+
+
+
+
+
+
+
+
+
+We warmly welcome every developer interested in reinforcement learning and large language models to try **AMem NCCL-Plugin** and share your valuable feedback and suggestion together, let’s drive continuous innovation in RL systems!
+
+📦 **GitHub Repository**: [<font style="color:rgb(94, 92, 230);">https://github.com/inclusionAI/asystem-amem](https://github.com/inclusionAI/asystem-amem)  
+⭐ Please feel free to **Star** and **Fork** the repo, and we’d love to see your **PRs**!
+
+
+
+
+
+Stay tuned for the latest releases from Ant Group’s **Bailing Models**:  
+🤗 **Hugging Face**: [<font style="color:rgb(94, 92, 230);">https://huggingface.co/inclusionAI](https://huggingface.co/inclusionAI)  
+🤖 **ModelScope Community**: [<font style="color:rgb(94, 92, 230);">https://www.modelscope.cn/organization/inclusionAI](https://www.modelscope.cn/organization/inclusionAI)
+
+<font style="color:rgb(94, 92, 230);">
+
+<font style="color:rgb(94, 92, 230);">
+
+The **Ant ASystem team** is also actively hiring top talent from the industry. If you’re passionate about reinforcement learning, training/inference engines, and pushing the boundaries of cutting-edge systems in a rapidly evolving world, we’d love for you to join us!
+
+Interested candidates can apply via:  
+**Ant Group – Training & Inference System R&D Expert – Hangzhou / Beijing / Shanghai**  
+[<font style="color:rgb(94, 92, 230);">https://talent.antgroup.com/off-campus-position?positionId=25052904956438&tid=0b442eeb17633881544247991e1cc0](https://talent.antgroup.com/off-campus-position?positionId=25052904956438&tid=0b442eeb17633881544247991e1cc0)
+
+Or send your resume directly to: [**<font style="color:rgb(94, 92, 230);">ASystem@service.alipay.com**](mailto:ASystem@service.alipay.com)
+
