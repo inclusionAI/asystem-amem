@@ -71,7 +71,7 @@ Compared to memory offloading in PyTorch/Python, transparent NCCL memory offload
 2. **Distributed P2P Memory Cross-References**: Unlike per-rank data (e.g., sharded weights, activations, KV cache), NCCL creates complex cross-rank P2P references for collective communication. Simply freeing local memory doesn’t release resources to the driver. Over multiple rounds, unreleased old buffers accumulate, causing NCCL memory usage to grow. This unique **distributed memory cross-reference problem** requires precise restoration—any mismatch risks crashes or hangs.
 3. **Complex Logic from Dynamic Connections & Hybrid Parallelism**: NCCL is hard to modify, and corner cases are numerous during validation. For example, NVIDIA’s 2024 **symmetric memory** (for NVSwitch-based high-speed collectives) introduces even more complex memory management logic (see Figure 3).
 
-![](./doc/sym_mem.webp)
+![](./doc/sym_mem.png)
 
 ![](./doc/nv_switch.png)
 
@@ -91,7 +91,7 @@ AMem NCCL-Plugin leverages CUDA’s VMM APIs and employs a clean two-layer decou
 
 
 
-![](./doc/overall_arch.webp)
+![](./doc/overall_arch.png)
 
 _Figure 4: Overall Architecture of AMem NCCL-Plugin_
 
@@ -114,7 +114,7 @@ _Figure 5: NVIDIA P2P Memory Cross-Reference and Handling (simplified multi-GPU 
 ### Guarantee 2: State Management
 AMem maintains and updates internal states for each process and NCCL memory allocation (`dptr`), ensuring completeness and real-time accuracy (Figure 6).
 
-![](./doc/process_status.webp)
+![](./doc/process_status.png)
 
 _Figure 6: Process and Memory State Transitions_
 

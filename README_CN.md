@@ -61,7 +61,7 @@ _图2：NVIDIA VMM显存管理API和典型操作_
 2. 分布式 P2P **显存交叉引用**：尤其是，区别于 rank 自身数据（例如已切分后的权重、激活、KV 等），NCCL为集合通信而生，典型多卡环境下引入了复杂的 cross-rank P2P 引用。进程如果只 free 自己的显存并不会释放资源给驱动，且多个回合后，老的不去，不断新分，NCCL 显存占用反而越来越大。本质上这里有个独特的分布式显存交叉引用问题。同时，恢复时必须严丝合缝，如数还原，否则易引发 crash 或 hang 等问题；
 3. 动态建联、3D/4D 混合并行等导致复杂逻辑：NCCL 修改难度大，测速验证 corner case 多。例如 2024 年NVIDIA 针对 NVSwitch 高速集合通信进一步推出了 symmetric memory，其显存管理逻辑更为复杂（见下图图 3）
 
-![](./doc/sym_mem.webp)
+![](./doc/sym_mem.png)
 
 ![](./doc/nv_switch.png)
 
@@ -81,7 +81,7 @@ AMem NCCL-Plugin 基于 CUDA 的 VMM API，设计了**简洁的两层解耦方�
 
 
 
-![](./doc/overall_arch.webp)
+![](./doc/overall_arch.png)
 
 _图4：AMem NCCL-plugin总体架构图_
 
@@ -101,7 +101,7 @@ _图 5：NVIDIA P2P 显存交叉引用和处理（注：多卡对等，示例为
 ### 功能保障二：状态管理保障
 AMem NCCL-plugin 对进程状态和每个 NCCL 显存分配地址（dptr）维护、更新内部状态，如图 6 所示，保证状态管理的完备和实时。
 
-![](./doc/process_status.webp)
+![](./doc/process_status.png)
 
 图6：进程和显存状态和转移示意
 
@@ -110,7 +110,7 @@ AMem NCCL-plugin 对进程状态和每个 NCCL 显存分配地址（dptr）维�
 
 需要注意的是，多卡（rank）本质是对等关系，图中仅以 rank0 的视角示例，来说明核心流程。
 
-![](./doc/workflow.webp)
+![](./doc/workflow.png)
 
 图7：AMem NCCL-plugin分布式NCCL显存卸载与恢复流程
 
