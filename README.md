@@ -14,7 +14,6 @@ Below is a brief comparison:
 | | NCCL | Slime | verl, AReal, openRLHF | AMem |
 | --- | --- | --- | --- | --- |
 | Live offload | <font style="color:#DF2A3F;">N</font> | <font style="color:#DF2A3F;">N</font>*<br/>restart process at the cost of communication rebuild overhead, potentially a few minutes. | <font style="color:#DF2A3F;">N</font> | Y<br/> |
- && \
 
 
 
