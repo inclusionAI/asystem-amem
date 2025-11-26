@@ -27,16 +27,16 @@ _图1：AMem NCCL-plugin 功能对比_
 
 _注 1: 显存释放：把显存交还操作系统；显存卸载：把显存中的信息放入CPU pinned buffer, 然后释放显存；显存恢复：把显存重新分配回来，把暂存 CPU pinned buffer 的信息拷贝回显存中。_
 
-_注 2: slime 介绍,__ Slime V0.1.0. _[_https://zhuanlan.zhihu.com/p/1945237948166547268_](https://zhuanlan.zhihu.com/p/1945237948166547268)
+_注 2: slime 介绍, Slime V0.1.0._[_https://zhuanlan.zhihu.com/p/1945237948166547268_](https://zhuanlan.zhihu.com/p/1945237948166547268)
 
 代码地址：[https://github.com/inclusionAI/asystem-amem](https://github.com/inclusionAI/asystem-amem)
 
 ## 背景问题
-**强化学习****共卡部署的难点**：典型强化学习系统，如果采用训推共卡部署，一个任务完成后需要将GPU资源快速、干净释放给后续任务，以提高资源效率。而 GPU **算力是无状态的，用完即放 —— 而显存是有状态的**，对它进行管理有一定的工作量。例如：需暂存关键内容到主机内存后再释放显存；后续恢复显存时需要把关键信息拷回。这对显存管理带来了较大的技术挑战，涉及**显存分配、跨进程引用、状态恢复等复杂问题**。
+**强化学习共卡部署的难点**：典型强化学习系统，如果采用训推共卡部署，一个任务完成后需要将GPU资源快速、干净释放给后续任务，以提高资源效率。而 GPU **算力是无状态的，用完即放 —— 而显存是有状态的**，对它进行管理有一定的工作量。例如：需暂存关键内容到主机内存后再释放显存；后续恢复显存时需要把关键信息拷回。这对显存管理带来了较大的技术挑战，涉及**显存分配、跨进程引用、状态恢复等复杂问题**。
 
 **显存管理的难点**：CUDA 显存管理有多种 APIs，为了满足进程存活而释放显存资源，需要采用 Virtual Memory Management APIs (VMM or cuMem)，这组 API 提供了两层地址管理和动态映射能力，具体详见图 2 总结。当前 PyTorch、NCCL 等都有参数可选激活 VMM 显存分配方式。
 
-![](../docs/images/vmm_api_ops.png)
+![](./docs/images/vmm_api_ops.png)
 
 _图2：NVIDIA VMM显存管理API和典型操作_
 
@@ -47,7 +47,7 @@ _图2：NVIDIA VMM显存管理API和典型操作_
 
 社区对多数显存已有初步管理支持，但对某些显存的管理仍存在不足， NCCL 显存就是其中比较突出的一个难点。
 
-**NCCL 显存卸载的难点：**NCCL 通信库所占显存，没有对外暴露管理接口，造成管理不便。常见的管理方案有：
+**NCCL 显存卸载的难点**：NCCL 通信库所占显存，没有对外暴露管理接口，造成管理不便。常见的管理方案有：
 
 + 不释放 NCCL 显存，例如图 1 所示 NCCL 显存可能就占据 10GB ~ 20GB，会显著影响训推的 batch size；而强化学习总体是吞吐密集，batch size 比较重要。本方案可以节省 RL 每个 step 的建联开销；
 + 如果销毁训推进程或者通信组，也可以实现干净释放显存。而代价是各种初始化、大规模 NCCL 通信建联，其时间开销往往较大（通常为分钟级，当然存在优化空间如 Meta 等最近的工作）；
@@ -61,9 +61,9 @@ _图2：NVIDIA VMM显存管理API和典型操作_
 2. 分布式 P2P **显存交叉引用**：尤其是，区别于 rank 自身数据（例如已切分后的权重、激活、KV 等），NCCL为集合通信而生，典型多卡环境下引入了复杂的 cross-rank P2P 引用。进程如果只 free 自己的显存并不会释放资源给驱动，且多个回合后，老的不去，不断新分，NCCL 显存占用反而越来越大。本质上这里有个独特的分布式显存交叉引用问题。同时，恢复时必须严丝合缝，如数还原，否则易引发 crash 或 hang 等问题；
 3. 动态建联、3D/4D 混合并行等导致复杂逻辑：NCCL 修改难度大，测速验证 corner case 多。例如 2024 年NVIDIA 针对 NVSwitch 高速集合通信进一步推出了 symmetric memory，其显存管理逻辑更为复杂（见下图图 3）
 
-![](../docs/images/sym_mem.png)
+![](./docs/images/sym_mem.png)
 
-![](../docs/images/nv_switch.png)
+![](./docs/images/nv_switch.png)
 
 _图 3：NVIDIA symmetric memory 相关 API_
 
@@ -81,7 +81,7 @@ AMem NCCL-Plugin 基于 CUDA 的 VMM API，设计了**简洁的两层解耦方�
 
 
 
-![](../docs/images/overall_arch.png)
+![](./docs/images/overall_arch.png)
 
 _图4：AMem NCCL-plugin总体架构图_
 
@@ -94,38 +94,38 @@ AMem NCCL-plugin 会动态跟踪记录“某个 handle 被哪些 peer 所引用�
 
 
 
-![](../docs/images/p2p_mem_ref.png)
+![](./docs/images/p2p_mem_ref.png)
 
 _图 5：NVIDIA P2P 显存交叉引用和处理（注：多卡对等，示例为简化展示）_
 
 ### 功能保障二：状态管理保障
 AMem NCCL-plugin 对进程状态和每个 NCCL 显存分配地址（dptr）维护、更新内部状态，如图 6 所示，保证状态管理的完备和实时。
 
-![](../docs/images/process_status.png)
+![](./docs/images/process_status.png)
 
-图6：进程和显存状态和转移示意
+_图6：进程和显存状态和转移示意_
 
 ### 功能保障三：流程保障：分布式卸载与恢复
 通过内置的 UDS 通信，AMem NCCL-plugin 重点实现了跨进程 P2P reference 溯源、元数据更新和正确的 redo，流程上保证了分布式情况下依然可以有效实现卸载与恢复，具体流程如图 7 所示。
 
 需要注意的是，多卡（rank）本质是对等关系，图中仅以 rank0 的视角示例，来说明核心流程。
 
-![](../docs/images/workflow.png)
+![](./docs/images/workflow.png)
 
-图7：AMem NCCL-plugin分布式NCCL显存卸载与恢复流程
+_图7：AMem NCCL-plugin分布式NCCL显存卸载与恢复流程_
 
 ## 总结 & 效果展示
 AMem NCCL-plugin 可以将 NCCL 的显存几乎全部卸载，并按需恢复<sup>注3</sup>，同时保留 NCCL 通信组。能卸载的显存取决于集群规模、所用集合通信<sup>注4</sup>的通信组数量（特别是 AlltoAll）、并行策略（通常会 3D~5D 并行）以及CUDA/NCCL 版本等，大规模任务的 NCCL 显存开销可能会达到 10GB~20GB /GPU。目前无需重建通信组，使得 AMem 的 **NCCL 显存恢复耗时典型值不到 1s**<sup>注5</sup>。
 
-![](../docs/images/result1.webp)        ![](../docs/images/result2.webp)
+![](./docs/images/result1.webp)        ![](./docs/images/result2.webp)
 
-图 8：AMem NCCL-plugin 可将 NCCL 分配的显存几乎全部卸载（左右为不同卡型）
+_图 8：AMem NCCL-plugin 可将 NCCL 分配的显存几乎全部卸载（左右为不同卡型）_
 
-注 3: cuda context 显存不卸载（典型~800MB），这部分显存会和训/推进程共用。
+_注 3: cuda context 显存不卸载（典型~800MB），这部分显存会和训/推进程共用。_
 
-注 4: 常用的集合通信（分布式策略的一种实现方式）源语包括：（框架层）Broadcast, Scatter, Gather, Reduce；（训推）AllGather （所有的卡都执行 Gather），AllReduce, ReduceScatter, AlltoAll 等。
+_注 4: 常用的集合通信（分布式策略的一种实现方式）源语包括：（框架层）Broadcast, Scatter, Gather, Reduce；（训推）AllGather （所有的卡都执行 Gather），AllReduce, ReduceScatter, AlltoAll 等。_
 
-注 5: 首次卸载较慢（因为需要分配 CPU pinned buffer），后续通常 <1 sec。此处的 CPU pinned buffer，用来卸载 NCCL 的元数据、建联信息等，而用户分配的显存可以全部释放。
+_注 5: 首次卸载较慢（因为需要分配 CPU pinned buffer），后续通常 <1 sec。此处的 CPU pinned buffer，用来卸载 NCCL 的元数据、建联信息等，而用户分配的显存可以全部释放。_
 
 ## Getting Started 安装编译
 ### 代码
@@ -212,7 +212,7 @@ bash ./run.sh
 
 测试运行示例：
 
-![](../docs/images/run_result.webp)
+![](./docs/images/run_result.webp)
 
 ### 框架集成
 AMem NCCL-plugin 不影响正常 NCCL 功能使用，而扩充了新的接口，用户可按需调用：

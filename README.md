@@ -328,36 +328,3 @@ Memory management and optimization require sustained investment. For legacy-comp
 + Zhiyi Hu, Siyuan Shen, Tommaso Bonato, Sylvain Jeaugey, Cedell Alexander, Eric Spada, James Dinan, Jeff Hammond, Torsten Hoefler.Demystifying NCCL: An In-depth Analysis of GPU Communication Protocols and Algorithms, arXiv preprint arXiv:[2507.04786](https://arxiv.org/abs/2507.04786)
 + NVIDIA. NCCL 2.27. [https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.](https://developer.nvidia.com/blog/enabling-fast-inference-and-resilient-training-with-nccl-2-27/.)Accessed: 2025-10-10
 
-
-
-
-
-
-
-
-
-We warmly welcome every developer interested in reinforcement learning and large language models to try **AMem NCCL-Plugin** and share your valuable feedback and suggestion together, let’s drive continuous innovation in RL systems!
-
-📦 **GitHub Repository**: [<font style="color:rgb(94, 92, 230);">https://github.com/inclusionAI/asystem-amem](https://github.com/inclusionAI/asystem-amem)  
-⭐ Please feel free to **Star** and **Fork** the repo, and we’d love to see your **PRs**!
-
-
-
-
-
-Stay tuned for the latest releases from Ant Group’s **Bailing Models**:  
-🤗 **Hugging Face**: [<font style="color:rgb(94, 92, 230);">https://huggingface.co/inclusionAI](https://huggingface.co/inclusionAI)  
-🤖 **ModelScope Community**: [<font style="color:rgb(94, 92, 230);">https://www.modelscope.cn/organization/inclusionAI](https://www.modelscope.cn/organization/inclusionAI)
-
-<font style="color:rgb(94, 92, 230);">
-
-<font style="color:rgb(94, 92, 230);">
-
-The **Ant ASystem team** is also actively hiring top talent from the industry. If you’re passionate about reinforcement learning, training/inference engines, and pushing the boundaries of cutting-edge systems in a rapidly evolving world, we’d love for you to join us!
-
-Interested candidates can apply via:  
-**Ant Group – Training & Inference System R&D Expert – Hangzhou / Beijing / Shanghai**  
-[<font style="color:rgb(94, 92, 230);">https://talent.antgroup.com/off-campus-position?positionId=25052904956438&tid=0b442eeb17633881544247991e1cc0](https://talent.antgroup.com/off-campus-position?positionId=25052904956438&tid=0b442eeb17633881544247991e1cc0)
-
-Or send your resume directly to: [**<font style="color:rgb(94, 92, 230);">ASystem@service.alipay.com**](mailto:ASystem@service.alipay.com)
-
