@@ -36,7 +36,7 @@ _注 2: slime 介绍,__ Slime V0.1.0. _[_https://zhuanlan.zhihu.com/p/1945237948
 
 **显存管理的难点**：CUDA 显存管理有多种 APIs，为了满足进程存活而释放显存资源，需要采用 Virtual Memory Management APIs (VMM or cuMem)，这组 API 提供了两层地址管理和动态映射能力，具体详见图 2 总结。当前 PyTorch、NCCL 等都有参数可选激活 VMM 显存分配方式。
 
-![](./doc/vmm_api_ops.png)
+![](../docs/images/vmm_api_ops.png)
 
 _图2：NVIDIA VMM显存管理API和典型操作_
 
@@ -61,9 +61,9 @@ _图2：NVIDIA VMM显存管理API和典型操作_
 2. 分布式 P2P **显存交叉引用**：尤其是，区别于 rank 自身数据（例如已切分后的权重、激活、KV 等），NCCL为集合通信而生，典型多卡环境下引入了复杂的 cross-rank P2P 引用。进程如果只 free 自己的显存并不会释放资源给驱动，且多个回合后，老的不去，不断新分，NCCL 显存占用反而越来越大。本质上这里有个独特的分布式显存交叉引用问题。同时，恢复时必须严丝合缝，如数还原，否则易引发 crash 或 hang 等问题；
 3. 动态建联、3D/4D 混合并行等导致复杂逻辑：NCCL 修改难度大，测速验证 corner case 多。例如 2024 年NVIDIA 针对 NVSwitch 高速集合通信进一步推出了 symmetric memory，其显存管理逻辑更为复杂（见下图图 3）
 
-![](./doc/sym_mem.png)
+![](../docs/images/sym_mem.png)
 
-![](./doc/nv_switch.png)
+![](../docs/images/nv_switch.png)
 
 _图 3：NVIDIA symmetric memory 相关 API_
 
@@ -81,7 +81,7 @@ AMem NCCL-Plugin 基于 CUDA 的 VMM API，设计了**简洁的两层解耦方�
 
 
 
-![](./doc/overall_arch.png)
+![](../docs/images/overall_arch.png)
 
 _图4：AMem NCCL-plugin总体架构图_
 
@@ -94,14 +94,14 @@ AMem NCCL-plugin 会动态跟踪记录“某个 handle 被哪些 peer 所引用�
 
 
 
-![](./doc/p2p_mem_ref.png)
+![](../docs/images/p2p_mem_ref.png)
 
 _图 5：NVIDIA P2P 显存交叉引用和处理（注：多卡对等，示例为简化展示）_
 
 ### 功能保障二：状态管理保障
 AMem NCCL-plugin 对进程状态和每个 NCCL 显存分配地址（dptr）维护、更新内部状态，如图 6 所示，保证状态管理的完备和实时。
 
-![](./doc/process_status.png)
+![](../docs/images/process_status.png)
 
 图6：进程和显存状态和转移示意
 
@@ -110,14 +110,14 @@ AMem NCCL-plugin 对进程状态和每个 NCCL 显存分配地址（dptr）维�
 
 需要注意的是，多卡（rank）本质是对等关系，图中仅以 rank0 的视角示例，来说明核心流程。
 
-![](./doc/workflow.png)
+![](../docs/images/workflow.png)
 
 图7：AMem NCCL-plugin分布式NCCL显存卸载与恢复流程
 
 ## 总结 & 效果展示
 AMem NCCL-plugin 可以将 NCCL 的显存几乎全部卸载，并按需恢复<sup>注3</sup>，同时保留 NCCL 通信组。能卸载的显存取决于集群规模、所用集合通信<sup>注4</sup>的通信组数量（特别是 AlltoAll）、并行策略（通常会 3D~5D 并行）以及CUDA/NCCL 版本等，大规模任务的 NCCL 显存开销可能会达到 10GB~20GB /GPU。目前无需重建通信组，使得 AMem 的 **NCCL 显存恢复耗时典型值不到 1s**<sup>注5</sup>。
 
-![](./doc/result1.webp)        ![](./doc/result2.webp)
+![](../docs/images/result1.webp)        ![](../docs/images/result2.webp)
 
 图 8：AMem NCCL-plugin 可将 NCCL 分配的显存几乎全部卸载（左右为不同卡型）
 
@@ -212,7 +212,7 @@ bash ./run.sh
 
 测试运行示例：
 
-![](./doc/run_result.webp)
+![](../docs/images/run_result.webp)
 
 ### 框架集成
 AMem NCCL-plugin 不影响正常 NCCL 功能使用，而扩充了新的接口，用户可按需调用：
