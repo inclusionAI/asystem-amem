@@ -1,0 +1,53 @@
+diff --git a/src/Makefile b/src/Makefile
+index 612395f..035cdfa 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -69,7 +69,9 @@ else
+ ${DST_DIR}/%_perf$(NAME_SUFFIX):${DST_DIR}/%.o ${DST_DIR}/common$(NAME_SUFFIX).o ${DST_DIR}/timer.o $(TEST_VERIFIABLE_OBJS)
+ 	@printf "Linking  %-35s > %s\n" $< $@
+ 	@mkdir -p ${DST_DIR}
+-	$(NVCC) -o $@ $(NVCUFLAGS) $^ ${NVLDFLAGS}
++	$(info $$ORIGIN)
++	$(NVCC) -o $@ $(NVCUFLAGS) $^ ${NVLDFLAGS} -Xlinker "-rpath=../../nccl/build/lib/"
++
+ endif
+ 
+ clean_intermediates:
+diff --git a/src/common.cu b/src/common.cu
+index 3987d89..a54b2b1 100644
+--- a/src/common.cu
++++ b/src/common.cu
+@@ -617,8 +617,18 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char*
+   }
+   TESTCHECK(completeColl(args));
+ 
++  int  pauseCnt = 0;
++  long repeat = getenv("RR")? atol(getenv("RR")) : run_cycles;
++  int testPause = getenv("LIVEPAUSE")? atol(getenv("LIVEPAUSE")) : true;
++  for (int i = 0; i < 2; ++i) {
++    ncclMemStats();
++    ncclPause(NULL);
++    sleep(6);
++    ncclResume(NULL);
++    printf("AMEM pid:%d pause-resume warmup loop:%d repeat:%ld pauseDuringBench:%d\n", getpid(), i, repeat, testPause);fflush(stdout);
++  }
++
+   // Benchmark
+-  long repeat = run_cycles;
+   do {
+     for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
+       setupArgs(size, type, args);
+@@ -627,7 +637,12 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char*
+       PRINT("%12li  %12li  %8s  %6s  %6s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
+       TESTCHECK(BenchTime(args, type, op, root, 0));
+       TESTCHECK(BenchTime(args, type, op, root, 1));
+-      PRINT("\n");
++      PRINT("\n");fflush(stdout);
++
++      if (testPause) {
++        ncclPause(NULL); sleep(6); ncclResume(NULL); sleep(5);
++        printf("AMEM pid:%d pause-resume loop:%d\n", getpid(), ++pauseCnt);fflush(stdout);
++      }
+     }
+   } while (--repeat);
+ 

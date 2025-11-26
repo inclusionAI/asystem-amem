@@ -1,0 +1,684 @@
+diff --git a/src/Makefile b/src/Makefile
+index eab662e..56aba0f 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -52,7 +52,7 @@ PKGTARGET  := $(PKGCONFIGFILE)
+ LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
+ BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
+ DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
+-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
++LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -fPIC -L../../../lib -lamem_nccl
+ INCPLUGIN  := include/plugin
+ 
+ DEVMANIFEST := $(BUILDDIR)/obj/device/manifest
+@@ -90,7 +90,7 @@ $(INCDIR)/nccl.h : nccl.h.in ../makefiles/version.mk
+ $(LIBDIR)/$(LIBTARGET): $(LIBOBJ) $(DEVMANIFEST)
+ 	@printf "Linking    %-35s > %s\n" $(LIBTARGET) $@
+ 	mkdir -p $(LIBDIR)
+-	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
++	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -lamem_nccl -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
+ 	ln -sf $(LIBSONAME) $(LIBDIR)/$(LIBNAME)
+ 	ln -sf $(LIBTARGET) $(LIBDIR)/$(LIBSONAME)
+ 
+@@ -131,7 +131,7 @@ $(PKGDIR)/%.pc : %.pc
+ $(OBJDIR)/%.o : %.cc $(INCTARGETS)
+ 	@printf "Compiling  %-35s > %s\n" $< $@
+ 	mkdir -p `dirname $@`
+-	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -c $< -o $@
++	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -std=c++17 -DAMEM_PLUGIN -I../../../amem_nccl_plugin -Iinclude -I$(INCPLUGIN) -c $< -o $@
+ 	@$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -M $< > $(@:%.o=%.d.tmp)
+ 	@sed "0,/^.*:/s//$(subst /,\/,$@):/" $(@:%.o=%.d.tmp) > $(@:%.o=%.d)
+ 	@sed -e 's/.*://' -e 's/\\$$//' < $(@:%.o=%.d.tmp) | fmt -1 | \
+diff --git a/src/allocator.cc b/src/allocator.cc
+index c581819..9d63b7b 100644
+--- a/src/allocator.cc
++++ b/src/allocator.cc
+@@ -69,6 +69,15 @@ ncclResult_t  ncclMemAlloc(void **ptr, size_t size) {
+     CUCHECK(cuMemAddressReserve((CUdeviceptr*)ptr, handleSize, memGran, 0, 0));
+     /* Map the virtual address range to the physical allocation */
+     CUCHECK(cuMemMap((CUdeviceptr)*ptr, handleSize, 0, handle, 0));
++
++    #ifdef AMEM_PLUGIN
++    if (requestedHandleTypes == CU_MEM_HANDLE_TYPE_FABRIC) {
++      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_FABRIC, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_FABRIC);
++    } else {
++      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_POSIX, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_POSIX);
++    }
++    #endif
++
+     /* Now allow RW access to the newly mapped memory */
+     for (int i = 0; i < dcnt; ++i) {
+       int p2p = 0;
+@@ -166,6 +175,10 @@ ncclResult_t ncclCommSymmetricAllocInternal(struct ncclComm* comm, size_t size,
+   comm->symAllocHead += allocSize;
+   *symPtr = regSymAddr;
+ 
++  #ifdef AMEM_PLUGIN
++  amem_addAllocInfo((CUdeviceptr)regSymAddr, allocSize, AMEM_TYPE_CUMEM_LOCAL_SYMM, cuDev, memHandle, -1, 0, comm, AMEM_CALLER_NCCL_SYMM);
++  #endif
++
+ exit:
+   return ret;
+ fail:
+@@ -194,3 +207,49 @@ exit:
+ fail:
+   goto exit;
+ }
++
++#ifdef AMEM_PLUGIN
++NCCL_API(ncclResult_t, ncclPause, ncclComm_t *comm);
++ncclResult_t ncclPause(ncclComm_t* comm) {
++  ncclResult_t ret = ncclSuccess;
++  NVTX3_FUNC_RANGE_IN(nccl_domain);
++   
++  amem_memPause(getpid(), 0);
++  TRACE_CALL("ncclPause()");
++  return ret;
++};
++
++NCCL_API(ncclResult_t, ncclResume, ncclComm_t * comm);
++ncclResult_t ncclResume(ncclComm_t* comm) {
++  ncclResult_t ret = ncclSuccess;
++  NVTX3_FUNC_RANGE_IN(nccl_domain);
++
++  amem_memResume(getpid(), 0);
++  TRACE_CALL("ncclResume()");
++
++  return ret;
++}
++
++NCCL_API(ncclResult_t, ncclMemStats);
++ncclResult_t ncclMemStats() {
++  ncclResult_t ret = ncclSuccess;
++  NVTX3_FUNC_RANGE_IN(nccl_domain);
++
++  amem_dumpAllocStats();
++  TRACE_CALL("ncclMemStats()");
++
++  return ret;
++}
++
++NCCL_API(ncclResult_t, ncclSetGroupID, int);
++ncclResult_t ncclSetGroupID(int id) {
++  int ret_ = amem_setGroupID(id);
++  return (ncclResult_t) ret_;
++}
++
++NCCL_API(ncclResult_t, ncclGetGroupID, int*);
++ncclResult_t ncclGetGroupID(int *id) {
++  amem_getGroupID(id);
++  return ncclSuccess;
++}
++#endif
+diff --git a/src/collectives.cc b/src/collectives.cc
+index 03122f8..36a24f2 100644
+--- a/src/collectives.cc
++++ b/src/collectives.cc
+@@ -78,6 +78,9 @@ NCCL_API(ncclResult_t, ncclAllGather, const void* sendbuff, void* recvbuff, size
+     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
+     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   // Just pass the size of one message and not the total bytes sent/received.
+   NVTX3_FUNC_WITH_PARAMS(AllGather, NcclNvtxParamsAllGather,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, sendcount * ncclTypeSize(datatype)));
+@@ -92,6 +95,9 @@ NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream);
+ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(AllReduce, NcclNvtxParamsAllReduce,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op));
+ 
+@@ -105,6 +111,9 @@ NCCL_API(ncclResult_t, ncclBroadcast, const void* sendbuff, void* recvbuff, size
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Broadcast, NcclNvtxParamsBroadcast,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root));
+ 
+@@ -118,6 +127,9 @@ NCCL_API(ncclResult_t, ncclBcast, void* buff, size_t count, ncclDataType_t datat
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   return ncclBroadcast(buff, buff, count, datatype, root, comm, stream);
+ }
+ 
+@@ -125,6 +137,9 @@ NCCL_API(ncclResult_t, ncclReduce, const void* sendbuff, void* recvbuff, size_t
+     ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
+     ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Reduce, NcclNvtxParamsReduce,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root, op));
+ 
+@@ -138,6 +153,9 @@ NCCL_API(ncclResult_t, ncclReduceScatter, const void* sendbuff, void* recvbuff,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream);
+ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(ReduceScatter, NcclNvtxParamsReduceScatter,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, recvcount * ncclTypeSize(datatype), op));
+ 
+@@ -151,6 +169,9 @@ NCCL_API(ncclResult_t, ncclSend, const void* sendbuff, size_t count, ncclDataTyp
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Send, NcclNvtxParamsSendRecv,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
+ 
+@@ -164,6 +185,9 @@ NCCL_API(ncclResult_t, ncclRecv, void* recvbuff, size_t count, ncclDataType_t da
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Recv, NcclNvtxParamsSendRecv,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
+ 
+diff --git a/src/group.cc b/src/group.cc
+index 08ac54e..fea6c78 100644
+--- a/src/group.cc
++++ b/src/group.cc
+@@ -89,6 +89,9 @@ ncclResult_t ncclAsyncJobComplete(struct ncclAsyncJob* job) {
+ 
+ NCCL_API(ncclResult_t, ncclGroupStart);
+ ncclResult_t ncclGroupStart() {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NVTX3_FUNC_RANGE_IN(nccl_domain);
+ 
+@@ -99,6 +102,9 @@ ncclResult_t ncclGroupStart() {
+ 
+ NCCL_API(ncclResult_t, ncclGroupEnd);
+ ncclResult_t ncclGroupEnd() {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NVTX3_FUNC_RANGE_IN(nccl_domain);
+   NCCLCHECKGOTO(ncclGroupEndInternal(), ret, exit);
+@@ -109,6 +115,9 @@ exit:
+ 
+ NCCL_API(ncclResult_t, ncclGroupSimulateEnd, ncclSimInfo_t* simInfo);
+ ncclResult_t ncclGroupSimulateEnd(ncclSimInfo_t* simInfo) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NVTX3_FUNC_RANGE_IN(nccl_domain);
+   NCCLCHECKGOTO(ncclGroupEndInternal(simInfo), ret, exit);
+diff --git a/src/include/alloc.h b/src/include/alloc.h
+index 021c91f..6c92b55 100644
+--- a/src/include/alloc.h
++++ b/src/include/alloc.h
+@@ -22,6 +22,10 @@
+ #include "cudawrap.h"
+ #endif
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ uint64_t clockNano(); // from utils.h with which we have a circular dependency
+ 
+ template<typename T>
+@@ -54,6 +58,7 @@ static inline ncclResult_t ncclCuMemHostAlloc(void** ptr, CUmemGenericAllocation
+   ALIGN_SIZE(size, granularity);
+   /* Allocate the physical memory on the device */
+   CUCHECK(cuMemCreate(&handle, size, &prop, 0));
++
+   /* Reserve a virtual address range */
+   CUCHECK(cuMemAddressReserve((CUdeviceptr*)ptr, size, granularity, 0, 0));
+   /* Map the virtual address range to the physical allocation */
+@@ -190,6 +195,9 @@ static inline ncclResult_t ncclCuMemAllocAddr(void **ptr, CUmemGenericAllocation
+   accessDesc.location.id = cudaDev;
+   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+   CUCHECK(cuMemSetAccess((CUdeviceptr)*ptr, size, &accessDesc, 1));
++  #ifdef AMEM_PLUGIN
++  amem_addAllocInfo((CUdeviceptr)ptr, size, AMEM_TYPE_CUMEM_LOCAL, cudaDev, *handleIn, -1, 0, NULL, AMEM_CALLER_NCCL_DEFAULT);
++  #endif
+   TRACE(NCCL_ALLOC, "CuMem Map Size %zu pointer %p handle %llx", size, *ptr, *handleIn);
+   return result;
+ }
+@@ -199,6 +207,9 @@ static inline ncclResult_t ncclCuMemFreeAddr(void *ptr) {
+   ncclResult_t result = ncclSuccess;
+   size_t size = 0;
+   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
++  #ifdef AMEM_PLUGIN
++  amem_delAllocInfo((CUdeviceptr) ptr, 0, 0);
++  #endif
+   CUCHECK(cuMemUnmap((CUdeviceptr)ptr, size));
+   CUCHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
+   return result;
+@@ -231,6 +242,9 @@ static inline ncclResult_t ncclCuMemAlloc(void **ptr, CUmemGenericAllocationHand
+   /* Map the virtual address range to the physical allocation */
+   CUCHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
+   /* Now allow RW access to the newly mapped memory */
++  #ifdef AMEM_PLUGIN
++  amem_addAllocInfo((CUdeviceptr)*ptr, size, AMEM_TYPE_CUMEM_LOCAL, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_P2P);
++  #endif
+   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+   accessDesc.location.id = currentDev;
+   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+@@ -247,11 +261,16 @@ static inline ncclResult_t ncclCuMemFree(void *ptr) {
+   size_t size = 0;
+   CUCHECK(cuMemRetainAllocationHandle(&handle, ptr));
+   CUCHECK(cuMemRelease(handle));
++  #ifdef AMEM_PLUGIN
++  amem_delAllocInfo((CUdeviceptr) ptr, handle, 0);
++  #endif
+   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+   TRACE(NCCL_ALLOC, "CuMem Free Size %zu pointer %p handle 0x%llx", size, ptr, handle);
+   CUCHECK(cuMemUnmap((CUdeviceptr)ptr, size));
++
+   CUCHECK(cuMemRelease(handle));
+   CUCHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
++
+   return result;
+ }
+ 
+diff --git a/src/include/gdrwrap.h b/src/include/gdrwrap.h
+index 705f866..7933293 100644
+--- a/src/include/gdrwrap.h
++++ b/src/include/gdrwrap.h
+@@ -201,6 +201,10 @@ static ncclResult_t ncclGdrCudaCalloc(T** ptr, T** devPtr, size_t nelem, void**
+   ALIGN_SIZE(mapSize, GPU_PAGE_SIZE);
+   // GDRCOPY Pinned buffer has to be GPU_PAGE_SIZE aligned too
+   NCCLCHECK(ncclCudaCalloc(&devMem, mapSize+GPU_PAGE_SIZE-1));
++#ifdef AMEM_PLUGIN
++  printf("AMEM pid:%d %s %d regMr dptr:%p sz:%zu now defensive remove\n", getpid(), __FUNCTION__, __LINE__, devMem, mapSize+GPU_PAGE_SIZE-1); 
++  amem_delAllocInfo((CUdeviceptr)devMem, 0, 0);
++#endif
+   uint64_t alignedAddr = (((uint64_t) devMem) + GPU_PAGE_OFFSET) & GPU_PAGE_MASK;
+   size_t align = alignedAddr - (uint64_t)devMem;
+ 
+diff --git a/src/include/p2p.h b/src/include/p2p.h
+index e49c45d..73752fe 100644
+--- a/src/include/p2p.h
++++ b/src/include/p2p.h
+@@ -60,7 +60,7 @@ struct ncclIpcRegInfo {
+ 
+ ncclResult_t ncclP2pAllocateShareableBuffer(size_t size, int directMap, ncclIpcDesc *ipcDesc, void **ptr);
+ ncclResult_t ncclP2pFreeShareableBuffer(ncclIpcDesc *ipcDesc);
+-ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr);
++ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr, int peerDev=-1);
+ ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut);
+ ncclResult_t ncclIpcGraphRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut, void* cleanupQueuePtr, int* nCleanupQueueElts);
+ 
+diff --git a/src/nccl.h.in b/src/nccl.h.in
+index 292a839..234b16a 100644
+--- a/src/nccl.h.in
++++ b/src/nccl.h.in
+@@ -511,6 +511,22 @@ ncclResult_t pncclGroupEnd();
+ ncclResult_t  ncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
+ ncclResult_t pncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
+ 
++/*
++ * NCCL Pause()/Resume() APIs by AMem NCCL-plugin that release (then re-alloc) phy GPU memory while keeping dptr unchanged
++ * Pause(): offload (P2P buffer is optional) then release phy addr including references from peer, virtual dptr keep intact 
++ * Resume(): basically redo, e.g., alloc new phy addr, remap to existing dptr, preload data, notifer peer etc, thus everything is restored
++ * Notes: 
++ * - both APIs are blocked until all release/offload/preload run to complete
++ * - APIs shall be invoked in-order and in-pair e.g. Pause() then Resume()
++ * - for inter-GPU state consistency, it shall be handled by caller frameworks like SGLang, Megatron-LM etc
++ * - input argument comm currently is unused, just set as NULL
++ */
++ncclResult_t ncclPause(ncclComm_t * comm = NULL);
++ncclResult_t ncclResume(ncclComm_t* comm = NULL);
++ncclResult_t ncclMemStats();
++ncclResult_t ncclSetGroupID(int id);
++ncclResult_t ncclGetGroupID(int* id);
++
+ #ifdef __cplusplus
+ } // end extern "C"
+ #endif
+diff --git a/src/plugin/net.cc b/src/plugin/net.cc
+index 7894410..edc3d40 100644
+--- a/src/plugin/net.cc
++++ b/src/plugin/net.cc
+@@ -344,6 +344,10 @@ ncclResult_t ncclGpuGdrSupport(struct ncclComm* comm, int* gdrSupport) {
+     }
+ 
+     NCCLCHECKGOTO(ncclCudaMalloc(&gpuPtr, GPU_BUF_SIZE), ret, cleanup2);
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d regMr dptr:%p size:%d now defensive remove\n", getpid(), __FUNCTION__, __LINE__, gpuPtr, GPU_BUF_SIZE);
++    amem_delAllocInfo((CUdeviceptr)gpuPtr, 0, 0);
++#endif
+     if (comm->ncclNet->regMr(sComm, gpuPtr, GPU_BUF_SIZE, NCCL_PTR_CUDA, &mHandle) == ncclSuccess) {
+       NCCLCHECK(comm->ncclNet->deregMr(sComm, mHandle));
+       NCCLCHECK(comm->ncclNet->regMr(rComm, gpuPtr, GPU_BUF_SIZE, NCCL_PTR_CUDA, &mHandle));
+diff --git a/src/transport/coll_net.cc b/src/transport/coll_net.cc
+index 386865e..02d3acd 100644
+--- a/src/transport/coll_net.cc
++++ b/src/transport/coll_net.cc
+@@ -406,6 +406,10 @@ static ncclResult_t sharedBuffersInit(struct ncclCollNetSharedRes* collNet, int
+ 
+   if (cuda && collNet->cudaBuff == NULL) {
+     NCCLCHECK(ncclCudaCalloc(&collNet->cudaBuff, *size));
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d calloc dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, collNet->cudaBuff, *size);
++    amem_delAllocInfo((CUdeviceptr)collNet->cudaBuff, 0, 0);
++#endif
+     cudaMemset(collNet->cudaBuff, 0x33, *size/2);
+     cudaMemset((char*)collNet->cudaBuff + *size/2, 0x66, *size/2);
+   }
+@@ -524,6 +528,10 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
+   /* DMA-BUF support */
+   if (resources->useGdr && resources->useDmaBuf) {
+     CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d dptr:%llx size:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, dmabuf_fd);
++    amem_delAllocInfo((CUdeviceptr)mapMem->cpuPtr, 0, 0);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, mapMem->cpuPtr, mapMem->size,
+                                                        NCCL_PTR_CUDA, 0ULL, dmabuf_fd,
+                                                        &resources->sendMhandles[NCCL_PROTO_SIMPLE]),
+@@ -602,6 +610,10 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
+   /* DMA-BUF support */
+   if (resources->useGdr && resources->useDmaBuf) {
+     CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d dptr:%llx size:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, dmabuf_fd);
++    amem_delAllocInfo((CUdeviceptr)mapMem->cpuPtr, 0, 0);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, mapMem->cpuPtr, mapMem->size,
+                                                        NCCL_PTR_CUDA, 0ULL, dmabuf_fd,
+                                                        &resources->mhandles[NCCL_PROTO_SIMPLE]),
+@@ -1306,6 +1318,10 @@ static ncclResult_t sendProxyRegBuffer(struct ncclProxyConnection* connection, s
+   /* DMA-BUF support */
+   if (resources->useGdr && resources->useDmaBuf) {
+     CUCHECKGOTO(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d dptr:%llx sz:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size, dmabuf_fd);
++    amem_delAllocInfo((CUdeviceptr)info->buffer, 0, 0);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
+     needReg = false;
+   }
+@@ -1342,6 +1358,10 @@ static ncclResult_t recvProxyRegBuffer(struct ncclProxyConnection* connection, s
+   /* DMA-BUF support */
+   if (resources->useGdr && resources->useDmaBuf) {
+     CUCHECKGOTO(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d dptr:%llx sz:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size, dmabuf_fd);
++    amem_delAllocInfo((CUdeviceptr)info->buffer, 0, 0);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
+     needReg = false;
+   }
+diff --git a/src/transport/net.cc b/src/transport/net.cc
+index c0cd20d..c7ab963 100644
+--- a/src/transport/net.cc
++++ b/src/transport/net.cc
+@@ -551,8 +551,16 @@ static ncclResult_t sharedNetBuffersInit(struct ncclProxyState* proxyState, int
+   if (cuda && state->cudaBuff == NULL) {
+     if (sameProcess == 0 || ncclCuMemEnable()) {
+       NCCLCHECK(ncclP2pAllocateShareableBuffer(state->size, 0, &state->ipcDesc, (void**)&state->cudaBuff));
++#ifdef AMEM_PLUGIN
++      printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, state->cudaBuff, state->size);
++      amem_delAllocInfo((CUdeviceptr)state->cudaBuff, 0, 0);
++#endif
+     } else {
+       NCCLCHECK(ncclCudaCalloc(&state->cudaBuff, state->size));
++#ifdef AMEM_PLUGIN
++      printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, state->cudaBuff, state->size);
++      amem_delAllocInfo((CUdeviceptr)state->cudaBuff, 0, 0);
++#endif
+     }
+   }
+   if (!cuda && state->hostBuff == NULL) {
+@@ -801,8 +809,18 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
+         ALIGN_SIZE(map->mems[NCCL_NET_MAP_DEVMEM].size, CUDA_IPC_MIN);
+         NCCLCHECK(ncclP2pAllocateShareableBuffer(map->mems[NCCL_NET_MAP_DEVMEM].size, 0, &map->mems[NCCL_NET_MAP_DEVMEM].ipcDesc,
+                                                  (void**)&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr));
++#ifdef AMEM_PLUGIN
++        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, 
++			map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
++        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
++#endif
+       } else {
+         NCCLCHECK(ncclCudaCalloc(&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size));
++#ifdef AMEM_PLUGIN
++        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, 
++			map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
++        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
++#endif
+       }
+       map->mems[NCCL_NET_MAP_DEVMEM].cpuPtr = map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr;
+     }
+@@ -845,6 +863,9 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
+       if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
+         int dmabuf_fd;
+         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
++#ifdef AMEM_PLUGIN
++        printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p]);
++#endif
+         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netSendComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
+         (void)close(dmabuf_fd);
+       } else // FALL-THROUGH to nv_peermem GDR path
+@@ -963,6 +984,11 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
+       if (ncclCuMemEnable()) {
+         NCCLCHECK(ncclP2pAllocateShareableBuffer(map->mems[NCCL_NET_MAP_DEVMEM].size, 0, &map->mems[NCCL_NET_MAP_DEVMEM].ipcDesc,
+                                                  (void**)&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr));
++#ifdef AMEM_PLUGIN
++        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, 
++			map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
++        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
++#endif
+       } else {
+         NCCLCHECK(ncclCudaCalloc(&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size));
+       }
+@@ -997,6 +1023,9 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
+       if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
+         int dmabuf_fd;
+         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
++#ifdef AMEM_PLUGIN
++        printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p]);
++#endif
+         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
+         (void)close(dmabuf_fd);
+       } else // FALL-THROUGH to nv_peermem GDR path
+@@ -1668,6 +1697,9 @@ static ncclResult_t sendProxyRegBuffer(struct ncclProxyConnection* connection, s
+   if (resources->useDmaBuf) {
+     int dmabuf_fd;
+     CUCHECKGOTO(cuMemGetHandleForAddressRange((void*)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%ld defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclNet->regMrDmaBuf(resources->netSendComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
+     (void)close(dmabuf_fd);
+     needReg = false;
+@@ -1702,6 +1734,9 @@ static ncclResult_t recvProxyRegBuffer(struct ncclProxyConnection* connection, s
+   if (resources->useDmaBuf) {
+     int dmabuf_fd;
+     CUCHECKGOTO(cuMemGetHandleForAddressRange((void*)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
++#ifdef AMEM_PLUGIN
++    printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%ld defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size);
++#endif
+     NCCLCHECKGOTO(proxyState->ncclNet->regMrDmaBuf(resources->netRecvComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
+     (void)close(dmabuf_fd);
+     needReg = false;
+diff --git a/src/transport/nvls.cc b/src/transport/nvls.cc
+index da8d263..e8ac172 100644
+--- a/src/transport/nvls.cc
++++ b/src/transport/nvls.cc
+@@ -298,6 +298,10 @@ static ncclResult_t nvlsAllocateMem(struct ncclComm* comm, const CUmemAccessDesc
+   CUCHECKGOTO(cuMemSetAccess((CUdeviceptr)*mcptr, mcsize, desc, 1), ret, fail);
+   *ucsizePtr = ucsize;
+   *mcsizePtr = mcsize;
++  #ifdef AMEM_PLUGIN
++  // record ucHandle, ucptr, ucsize, mcHandle, offset (0 for now)
++  amem_addAllocInfo((CUdeviceptr)*ucptr, ucsize, AMEM_TYPE_CUMEM_LOCAL_SYMM, comm->cudaDev, (uint64_t)*ucHandle, -1, (uint64_t)*mcHandle, comm, AMEM_CALLER_NCCL_NVLS);
++  #endif
+   INFO(NCCL_NVLS, "NVLS rank %d (dev %d) alloc done, ucptr %p ucgran %ld mcptr %p mcgran %ld ucsize %ld mcsize %ld (inputsize %ld)", comm->rank, comm->cudaDev, *ucptr, ucgran, *mcptr, mcgran, ucsize, mcsize, size);
+ 
+ exit:
+diff --git a/src/transport/p2p.cc b/src/transport/p2p.cc
+index d263dda..ff969c3 100644
+--- a/src/transport/p2p.cc
++++ b/src/transport/p2p.cc
+@@ -223,6 +223,10 @@ ncclResult_t ncclP2pAllocateShareableBuffer(size_t size, int refcount, ncclIpcDe
+     }
+     if (refcount) {
+       memcpy(&ipcDesc->memHandle, &handle, sizeof(handle));
++#ifdef AMEM_PLGUIN
++      amem_addRefcount(*ptr, refcount);
++      printf("AMEM pid:%d func:%s %d handle %llx add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, handle, refcount);
++#endif
+       for (int r = 0; r < refcount; ++r) CUCHECK(cuMemRetainAllocationHandle(&handle, *ptr));
+     }
+ #else
+@@ -247,7 +251,7 @@ ncclResult_t ncclP2pFreeShareableBuffer(ncclIpcDesc *ipcDesc) {
+   return ncclSuccess;
+ }
+ 
+-ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr) {
++ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr, int peerDev) {
+   if (ncclCuMemEnable()) {
+ #if CUDART_VERSION >= 11030
+     // cuMem API support
+@@ -274,12 +278,20 @@ ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_
+       INFO(NCCL_P2P, "UDS converted handle 0x%lx to fd %d on remote peer %d", *(uint64_t*)&cuDesc->data, fd, peer);
+       CUCHECK(cuMemImportFromShareableHandle(&handle, (void *)(uintptr_t)fd, type));
+       SYSCHECK(close(fd), "close");
++
+     } else {
+       CUCHECK(cuMemImportFromShareableHandle(&handle, cuDesc, type));
+     }
+     CUCHECK(cuMemAddressReserve(&dptr, size, /* alignment */ 0, /* addr */ 0, /* flags */ 0));
+     CUCHECK(cuMemMap(dptr, size, /* offset */ 0, handle, /* flags */ 0));
+-
++    #ifdef AMEM_PLUGIN
++    if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
++      // cuDesc(union of data/handle, 8B) is the src handle
++      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_POSIX, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc->data, comm, AMEM_CALLER_NCCL_P2P_PEER);
++    } else {
++      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_FABRIC, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc, comm, AMEM_CALLER_NCCL_P2P_PEER);
++    }
++    #endif
+     TRACE(NCCL_P2P, "Imported shareable buffer size %zu handle 0x%llx dptr %p", size, handle, (void*)dptr);
+ 
+     // Allow access by the local GPU
+@@ -350,7 +362,7 @@ static ncclResult_t p2pMap(struct ncclComm *comm, struct ncclProxyConnector* pro
+     }
+   } else {
+     // Different PID
+-    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem));
++    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem, peerInfo->cudaDev));
+     *ipcPtr = *devMem;
+   }
+   return ncclSuccess;
+@@ -411,8 +423,14 @@ ncclResult_t p2pSendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, st
+   memset(&req, '\0', sizeof(req));
+   req.size = sendSize;
+   req.refcount = 0;
+-  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
+-  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
++  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) {
++    req.refcount++;
++    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
++  }
++  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) {
++    req.refcount++;
++    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
++  }
+   NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 1, info->rank, &send->proxyConn));
+   if (useMemcpy) {
+     NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgSetup, NULL, 0, &resources->proxyInfo, sizeof(struct p2pShmProxyInfo)));
+@@ -471,8 +489,14 @@ ncclResult_t p2pRecvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, st
+   memset(&req, '\0', sizeof(req));
+   req.size = recvSize;
+   req.refcount = 0;
+-  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
+-  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
++  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) {
++    req.refcount++;
++    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
++  }
++  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) {
++    req.refcount++;
++    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
++  }
+   NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 0, info->rank, &recv->proxyConn));
+   NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(struct ncclP2pRequest), &info->p2pBuff, sizeof(struct ncclP2pBuff)));
+ 
+@@ -911,6 +935,9 @@ ncclResult_t ret = ncclSuccess;
+           needUpdate = true;
+           *regBufFlag = 1;
+           INFO(NCCL_REG, "rank %d - IPC register buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p offsetOut %ld", comm->rank, userbuff, buffSize, (void*)regRecord->begAddr, ipcInfo.size, peerRank, rmtRegAddr, (uintptr_t)userbuff - regRecord->begAddr);
++          #ifdef AMEM_PLUGIN
++          amem_addPeerInfo(regRecord->begAddr, (CUdeviceptr)rmtRegAddr, peerRank);
++          #endif
+         }
+       }
+     }
+@@ -1079,6 +1106,11 @@ static ncclResult_t p2pProxyRegister(struct ncclProxyConnection* connection, str
+     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+     CUCHECKGOTO(cuMemSetAccess((CUdeviceptr)regAddr, ipcExpInfo->size, &accessDesc, 1), ret, fail);
+     regAddr = (void*)((uintptr_t)regAddr + ipcExpInfo->offset);
++    #ifdef AMEM_PLUGIN
++    if (ncclCuMemHandleType == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) { // No peer info available!!
++      amem_addAllocInfo((CUdeviceptr)regAddr, ipcExpInfo->size, AMEM_TYPE_CUMEM_PEER_POSIX, proxyState->cudaDev, handle, -1, ipcExpInfo->impFd, connection, AMEM_CALLER_NCCL_PROXY);
++    }
++    #endif
+   }
+   INFO(NCCL_REG, "Proxy rank %d register success regAddr %p size %ld offset %ld legacyIpcCap %d sameProcess %d", proxyState->tpRank, regAddr, ipcExpInfo->size, ipcExpInfo->offset, ipcExpInfo->legacyIpcCap, connection->sameProcess);
+ 
+@@ -1088,6 +1120,9 @@ exit:
+   return ret;
+ fail:
+   if (!ipcExpInfo->legacyIpcCap) {
++    #ifdef AMEM_PLUGIN
++    amem_delAllocInfo((CUdeviceptr) regAddr, 0, 0);
++    #endif
+     if (mapped) CUCHECK(cuMemUnmap((CUdeviceptr)regAddr, ipcExpInfo->size));
+     if (regAddr) CUCHECK(cuMemAddressFree((CUdeviceptr)regAddr, ipcExpInfo->size));
+     if (imported) CUCHECK(cuMemRelease(handle));
+@@ -1125,6 +1160,9 @@ ncclResult_t ncclIpcSymmetricInit(struct ncclComm* comm) {
+ 
+ ncclResult_t ncclIpcSymmetricFinalize(struct ncclComm* comm) {
+   if (comm->baseUCSymPtr) {
++    #ifdef AMEM_PLUGIN
++    amem_delAllocInfo((CUdeviceptr) comm->baseUCSymPtr, 0, 0);
++    #endif
+     CUCHECK(cuMemAddressFree((CUdeviceptr)comm->baseUCSymPtr, comm->baseStride * comm->localRanks));
+   }
+   return ncclSuccess;
+@@ -1169,6 +1207,16 @@ ncclResult_t ncclIpcSymmetricMap(struct ncclComm* comm, size_t offset, size_t si
+     CUCHECKGOTO(cuMemMap(maddr, size, 0, impHandle, 0), ret, fail);
+     CUCHECKGOTO(cuMemSetAccess(maddr, size, &accessDesc, 1), ret, fail);
+ 
++    #ifdef AMEM_PLUGIN
++    if (ncclCuMemHandleType == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
++       printf("AMEM pid:%d func:%s %d symm mem handle to support\n", getpid(), __FUNCTION__, __LINE__); fflush(stdout);
++       // TOFIX: convert localRankToRank[] to cudaDev
++      // amem_addAllocInfo(maddr, size, AMEM_TYPE_CUMEM_PEER_SYMM, comm->cudaDev, impHandle, comm->localRankToRank[r], (uint64_t)desc[r].data, comm, AMEM_CALLER_NCCL_SYMM_PEER);
++    } else {
++      // amem_addAllocInfo(maddr, size, AMEM_TYPE_CUMEM_PEER_SYMM, comm->cudaDev, impHandle, comm->localRankToRank[r],desc[r].handle, AMEM_CALLER_NCCL_DEFAULT);
++    }
++    #endif
++
+     if (r == comm->localRank) {
+       *symPtr = (void*)maddr;
+     } else {

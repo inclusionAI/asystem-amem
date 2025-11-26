@@ -1,0 +1,9 @@
+# build result
+*.egg-info/
+build/
+lib/
+
+*.o
+
+# editor file
+*.swp
