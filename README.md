@@ -14,14 +14,14 @@
 The benefits of AMem NCCL-Plugin are demonstrated in two key aspects:
 
 + **Memory Savings**: By identifying and resolving cross-rank GPU memory cross-references within the NCCL communication library, AMem correctly implements transparent memory release and restoration. During transitions between training and inference, it can free over 10 GB of GPU memory per card (Hopper architecture) while maintaining communication group connectivity.
-+ **Extreme Efficiency**: Since communication group connections are preserved, switching between training and inference only requires offloading and restoring NCCL metadata—no need to rebuild communication connections (which typically takes minutes). This reduces typical transition latency from minutes to **under 1 second**.
++ **Extreme Efficiency**: Since communication group connections are preserved, switching between training and inference only requires offloading and restoring NCCL metadata—no need to rebuild communication connections (which typically takes seconds). This reduces typical transition latency to **under 1 second**.
 
 Comparison with Community Solutions on Hopper Architecture GPUs:
 
 | System | Solution | Memory Saved | Per-step Offload/Reload Time |
 | --- | --- | --- | --- |
-| **Slime** | Clean NCCL GPU memory by destroying and recreating the training engine's communication group | Inference: No saving (2 GB left)<br/>Training: Saves 10 GB+ | Several minutes |
-| **Verl, OpenRLHF** | Does not support offloading NCCL GPU memory | Inference: No saving (2 GB left)<br/>Training: No saving (10 GB+ left) | 0s |
+| **Slime** | Clean NCCL GPU memory by destroying and recreating the training engine's communication group | Inference: No saving (2 GB left)<br/>Training: Saves 10 GB+ | Several seconds |
+| **OpenRLHF** | Does not support offloading NCCL GPU memory | Inference: No saving (2 GB left)<br/>Training: No saving (10 GB+ left) | 0s |
 | **AMem** | Offload and restore NCCL GPU memory via Plugin | Inference: Saves 2 GB<br/>Training: Saves 10 GB+ | <1s |
 
 
@@ -60,7 +60,7 @@ While the community has made initial progress managing most memory types, **NCCL
 NCCL does not expose external interfaces for managing its allocated GPU memory, making it difficult to control. Common approaches include:
 
 1. **Not releasing NCCL memory**: As shown in Figure 1, NCCL memory may occupy 10–20 GB, significantly limiting batch size—critical for throughput-intensive RL workloads. This approach avoids connection setup overhead per RL step.
-2. **Destroying and recreating training/inference processes or communication groups**: This cleanly releases memory but incurs high initialization costs (typically minutes), though recent optimizations (e.g., from Meta) show potential.
+2. **Destroying and recreating training/inference processes or communication groups**: This cleanly releases memory but incurs high initialization costs.
 
 Both approaches involve trade-offs: the first sacrifices memory for speed; the second trades time for memory. Our research focuses on achieving **both**.
 
