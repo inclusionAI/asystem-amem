@@ -212,7 +212,7 @@ AMEM groupID:170 pid:197780 total allocBytes:6043992064 (5764 MB)
 
 #### Key Environment Variables
 ```bash
-NCCL_ENABLE_CUMEM=1    # Required: enable NCCL CUMEM
+NCCL_CUMEM_ENABLE=1    # Required: enable NCCL CUMEM
 AMEM_ENABLE=1          # Enable NCCL memory offload/restore
 AMEM_GROUPID=xxx       # Assign distinct group IDs for training/inference processes
 ```

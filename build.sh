@@ -94,7 +94,7 @@ build_project() {
     # build nccl-tests
     cd $THIRD_NCCL_TEST;
     make -j96 MPI=1 \
-        MPI_HOME=/opt/hpcx/ompi \
+        MPI_HOME=${MPI_HOME:-/opt/hpcx/ompi} \
         NCCL_HOME=$THIRD_NCCL/build \
         NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
     cd $AMEM_ROOT_DIR;

@@ -188,7 +188,7 @@ AMEM groupID:170 pid:197780 total allocBytes:6043992064 (5764 MB)
 
 **重要参数：**
 
-+ NCCL_ENABLE_CUMEM=1  #必须打开NCCL CUMEM
++ NCCL_CUMEM_ENABLE=1  #必须打开NCCL CUMEM
 + AMEM_ENABLE=1 # 激活 NCCL Mem 卸载与恢复。框架层需按需调用 API
 + AMEM_GROUPID=xxx  #为训练和推理进程组设置不同的 groupID
     - 注：当和 RL 框架集成时，以上环境变量需要传递给 Ray 或训推框架
