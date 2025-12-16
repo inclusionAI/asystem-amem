@@ -1,5 +1,5 @@
 CUR_DIR=$(shell pwd)
-LOCAL_NCCL_DIR=$CUR_DIR/../third_party/nccl
+LOCAL_NCCL_DIR=$CUR_DIR/../third_party/nccl/build
 CUDA_DIR=/usr/local/cuda
 
 # may need to -I<current 2.27 NCCL.h directory>

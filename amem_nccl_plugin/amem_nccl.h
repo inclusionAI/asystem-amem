@@ -301,7 +301,7 @@ static inline CUresult amem_freeHost(void* ptr)
 }
 
 // Offload the content to cpu
-static inline CUresult amem_lauchOffload(void *cpuAddr, CUdeviceptr dptr, size_t size, CUstream stream, CUevent evt, bool async)
+static inline CUresult amem_launchOffload(void *cpuAddr, CUdeviceptr dptr, size_t size, CUstream stream, CUevent evt, bool async)
 {
   CUresult curet = CUDA_SUCCESS;
   curet = CHECK_DRV(cuMemcpyDtoHAsync(cpuAddr, dptr, size, stream));

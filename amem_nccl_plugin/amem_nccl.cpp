@@ -54,17 +54,21 @@ static void msleep(unsigned int time_msec) {
 // Init a client ctx
 static void InitClientCtx(int curDev) {
   if (!init_topo) {
+    LOGGER(DEBUG, "Init: init client on card %d", curDev);
     init_topo = true;
 
     std::lock_guard<std::mutex> lock_(gmm_lock);
     gmm_client_cfg_init(gmm_libP, g_cfg);
     if (!gmm_ctx_p) {  // defer init until first mem alloc
       gmm_ctx_p = new gmm_client_ctx(g_cfg);
+      LOGGER(DEBUG, "Init: init client's gmm_ctx on %d", curDev);
 
       CHECK_DRV(cuStreamCreate(&gmm_ctx_p->offloadStream[curDev], CU_STREAM_NON_BLOCKING));
       CHECK_DRV(cuStreamCreate(&gmm_ctx_p->preloadStream[curDev], CU_STREAM_NON_BLOCKING));
+      LOGGER(DEBUG, "Init: init client's cudaStream on %d", curDev);
       gmm_ctx_p->releaseShadowCnt = gmm_ctx_p->releaseLocalCnt = gmm_ctx_p->offloadCnt = gmm_ctx_p->smokeLog = 0;
       gmm_ctx_p->pauseCnt = gmm_ctx_p->resumeCnt = 0;
+      LOGGER(DEBUG, "Init: init client's count on %d", curDev);
       for (int i = 0; i < AMEM_MAX_CALLER; ++i) {
         gmm_ctx_p->allocBytes[i] = 0;
       }
@@ -84,12 +88,12 @@ void amem_dumpAllocStats(bool verbose)
   size_t total = 0;
   for (int i = 0; i < AMEM_MAX_CALLER; ++i) {
     if (gmm_ctx_p->allocBytes[i] != 0 && verbose) {
-      LOGGER(INFO, "groupID:%d pid:%d caller_%d allocBytes:%ld", amem_groupID, getpid(), i, gmm_ctx_p->allocBytes[i]);
+      LOGGER(DEBUG, "DumpStats: groupID:%d pid:%d caller_%d allocBytes:%ld", amem_groupID, getpid(), i, gmm_ctx_p->allocBytes[i]);
     }
     total += gmm_ctx_p->allocBytes[i];
   }
   total += gmm_ctx_p->delBytes; 
-  LOGGER(INFO, "groupID:%d pid:%d total GPU alloc:%ld (%ld MB), "
+  LOGGER(DEBUG, "DumpStats in total: groupID:%d pid:%d total GPU alloc:%ld (%ld MB), "
                "note including those mapped from peer, and defensive skiped %ld MB", amem_groupID, getpid(), 
                total, total >> 20, gmm_ctx_p->delBytes >> 20);
 }
@@ -99,6 +103,7 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
 		      CUmemGenericAllocationHandle localHandle,
                       int peerDev, uint64_t peerHandle, void *userInfo, amem_caller_type caller_type)
 {
+  LOGGER(DEBUG, "AllocInfo: localDev:%d", localDev);
   if (amem_plugin_disable > 0) {
     return 0;
   }
@@ -112,12 +117,21 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
   //     from GPUx.nccl (hasPeer is set in mdata). will be paused/resume.
   //     from GPUy.non-nccl (so not tracked by our mdata). out of scope
   bool oosFlag = (peerFlag && peerDev == -1) ? true : false;
+
+  if (peerFlag) {
+    LOGGER(DEBUG, "AllocInfo: detect peer memory");
+  } else {
+    LOGGER(DEBUG, "AllocInfo: detect normal memory");
+  }
+
+  if (!oosFlag) {
+  }
   InitClientCtx(curDev);
   
   {
     std::lock_guard<std::mutex> lock_(gmm_ctx_p->pause_mtx);
     if (gmm_ctx_p->paused) {
-      LOGGER(ERROR, "groupID:%d pid:%d NCCL is already paused! "
+      LOGGER(WARN, "Redundant pause: groupID:%d pid:%d NCCL is already paused! "
                     "DO NOT issue any NCCL op including memory alloc!", amem_groupID, getpid());
       return 1;
     }
@@ -126,6 +140,7 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
     auto it = tablePtr->find(localDptr);
     // Add metadata entry for the first time localDptr get created
     if (it == tablePtr->end()) {
+      LOGGER(DEBUG, "AllocInfo: localDptr is not register, register it now.");
       tablePtr->emplace(std::pair<CUdeviceptr, amem_allocMdata>(localDptr,
              amem_allocMdata(curDev, allocSz, (amem_allocType)type, AMEM_STATE_ALLOC, localHandle, userInfo, (size_t)caller_type, oosFlag, peerHandle)));
       if ((int)caller_type < AMEM_MAX_CALLER) {
@@ -150,20 +165,20 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
       // debug purpose logs
       if (gmm_ctx_p->smokeLog == 0) {
         // always print only for the first successful add
-        LOGGER(INFO, "groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
+        LOGGER(INFO, "AllocInfo: add meminfo successfully, groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
                      "dptr:%llx type:%s localHandle:%llx rmtHandle:%lx caller:%d", amem_groupID,
                       getpid(), allocSz, curDev, peerDev, srcDevDetected, localDptr,
                       (peerFlag == 0) ?"local":"remote", localHandle, peerHandle, (int)caller_type);
       } else {
         // then downgrade as DEBUG level
-        LOGGER(DEBUG, "groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
+        LOGGER(DEBUG, "AllocInfo: add meminfo successfully, groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
                       "dptr:%llx type:%s localHandle:%llx rmtHandle:%lx caller:%d", amem_groupID,
                       getpid(), allocSz, curDev, peerDev, srcDevDetected, localDptr,
                       (peerFlag == 0) ?"local":"remote", localHandle, peerHandle, (int)caller_type);
       }
     } else {
       // metdata already exist!?
-      LOGGER(WARN, "groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
+      LOGGER(WARN, "AllocInfo: find meminfo successfully, groupID:%d pid:%d allocSz:%ld curDev:%d peer:%d (detected:%d) "
                    "dptr:%llx type:%s localHandle:%llx rmtHandle:%lx caller:%d already exists!", amem_groupID,
                    getpid(), allocSz, curDev, peerDev, srcDevDetected, localDptr,
                    (peerFlag == 0) ?"local":"remote", localHandle, peerHandle, (int)caller_type);
@@ -179,6 +194,10 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
   // Then notify peer (src dev) to registerPeerInfo
   if (peerFlag && peerDev >= 0) {
     // Case1: peerDev is input by NCCL hook
+    LOGGER(DEBUG, "ALLocInfo: peerDev is input by NCCL hook. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
+                   "localHandle:%llx rmtHandle:%lx register peer:%d failed, remove metadata", amem_groupID,
+                   getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, peerDev);
+
     gmm_shmInfo_t *msgPtr = new gmm_shmInfo_t(GMM_IPC_MEM_NV_DEV_SHARE, curDev, (void *)localDptr, localHandle, allocSz, -1);
     // example: current is GPU1, map a physical handle from GPU0
     //   curDev is  GPU1, handle is 'localHandle', mapped to 'localDptr'
@@ -188,7 +207,7 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
     delete msgPtr;
 
     if (ret != 0) {
-      LOGGER(WARN, "groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
+      LOGGER(WARN, "ALLocInfo: communication failed. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
                    "localHandle:%llx rmtHandle:%lx register peer:%d failed, remove metadata", amem_groupID,
                    getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, peerDev);
       if (gmm_ctx_p->smokeLog == 0) { gtrace(); }
@@ -202,13 +221,18 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
 
   } else if (peerFlag && peerDev == -1) {
     // Case2: input peerDev is -1 now we use the detected cudaDev
+    LOGGER(DEBUG, "ALLocInfo: peerDev need to be detected. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
+                   "localHandle:%llx rmtHandle:%lx register peer:%d failed, remove metadata", amem_groupID,
+                   getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, peerDev);
+
+
     if (srcDevDetected >= 0) {
       gmm_shmInfo_t *msgPtr = new gmm_shmInfo_t(GMM_IPC_MEM_NV_DEV_SHARE, curDev, (void *)localDptr, localHandle, allocSz, -1);
       ret = gmm_ctx_p->register_peer(msgPtr, peerHandle, localDptr, curDev, srcDevDetected);
       delete msgPtr;
 
       if (ret != 0) {
-        LOGGER(WARN, "groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
+        LOGGER(WARN, "ALLocInfo: communication failed. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
                      "localHandle:%llx rmtHandle:%lx register peer:%d failed, remove metadata", amem_groupID,
                      getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, srcDevDetected);
         std::unordered_map<CUdeviceptr, amem_allocMdata>* tablePtr = &gmm_ctx_p->allocTable[localDev];
@@ -220,8 +244,8 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
 
     } else {
       // Case3: error! as the src dev may unmap -> remap new handle after resume which cause inconsistent
-      LOGGER(ERROR, "groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx localHandle:%llx rmtHandle:%lx "
-                    "peer:%d info is invalid!! may cause inconsistent or hang", amem_groupID,
+      LOGGER(ERROR, "ALLocInfo: info is invalid!! may cause inconsistent or hang. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx localHandle:%llx rmtHandle:%lx "
+                    "peer:%d", amem_groupID,
                     getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, peerDev);
       std::unordered_map<CUdeviceptr, amem_allocMdata>* tablePtr = &gmm_ctx_p->allocTable[localDev];
       auto it = tablePtr->find(localDptr);
@@ -233,6 +257,10 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
 
   } else if(!peerFlag) {
     // Case4: local accessed memory, add new entry
+    LOGGER(DEBUG, "ALLocInfo: local accessed memory. groupID:%d pid:%d allocSz:%ld curDev:%d dptr:%llx "
+                   "localHandle:%llx rmtHandle:%lx register peer:%d failed, remove metadata", amem_groupID,
+                   getpid(), allocSz, curDev, localDptr, localHandle, peerHandle, peerDev);
+
     gmm_ctx_p->handleTable[curDev].emplace(std::pair<CUmemGenericAllocationHandle, CUdeviceptr>(localHandle, localDptr));
   }
 
@@ -251,8 +279,10 @@ inline int amem_updateAllocInfo(CUdeviceptr dptr, int localDev, int type, CUmemG
   if (it != tablePtr->end()) {
     it->second.handle   = newHandle;
     it->second.state = AMEM_STATE_ALLOC;
+    LOGGER(DEBUG, "UpdateAllocInfo: info updated successfully. groupID:%d pid:%d dptr:%llx newHandle:%llx", amem_groupID, getpid(),
+                  dptr, newHandle);
   } else {
-    LOGGER(ERROR, "groupID:%d pid:%d failed to find info for dptr:%llx newHandle:%llx", amem_groupID, getpid(),
+    LOGGER(ERROR, "UpdateAllocInfo: cant find info. groupID:%d pid:%d dptr:%llx newHandle:%llx", amem_groupID, getpid(),
                   dptr, newHandle);
     ret = 1;
   }
@@ -315,10 +345,10 @@ int amem_addRefcount(void *dptr, int refcount)
   if (it_ != ptrTable->end()) {
     it_->second.refcount += refcount;
     ret = 0;
-    LOGGER(DEBUG, "groupID:%d pid:%d dptr:%p add refcount:%d done", amem_groupID, getpid(),
+    LOGGER(DEBUG, "Add refcount: success. groupID:%d pid:%d dptr:%p add refcount:%d", amem_groupID, getpid(),
                dptr, refcount);
   } else {
-    LOGGER(ERROR, "groupID:%d pid:%d failed to find metadata for dptr:%p when adding refcount:%d", amem_groupID, getpid(),
+    LOGGER(ERROR, "Add refcount: failed to find metadata. groupID:%d pid:%d dptr:%p when adding refcount:%d", amem_groupID, getpid(),
                dptr, refcount);
   }
 
@@ -340,10 +370,10 @@ int amem_addPeerInfo(CUdeviceptr srcPtr, CUdeviceptr peerPtr, int peerDev)
     it_->second.peers[peerDev] = peerPtr;
     it_->second.hasPeer = true;
     ret = 0;
-    LOGGER(DEBUG, "groupID:%d pid:%d localDptr:%llx register a peer:%d peerPtr:%llx done", amem_groupID, getpid(),
+    LOGGER(DEBUG, "Add peerInfo: register success. groupID:%d pid:%d localDptr:%llx register a peer:%d peerPtr:%llx done", amem_groupID, getpid(),
                srcPtr, peerDev, peerPtr);
   } else {
-    LOGGER(ERROR, "groupID:%d pid:%d failed to find for localDptr:%llx to register peer:%d peerPtr:%llx", amem_groupID, getpid(),
+    LOGGER(ERROR, "Add peerInfo: failed to find localDptr. groupID:%d pid:%d failed to find for localDptr:%llx to register peer:%d peerPtr:%llx", amem_groupID, getpid(),
                   srcPtr, peerDev, peerPtr);
   }
 
@@ -436,6 +466,7 @@ bool amem_checkPaused(bool warn)
 // Handler for mem pause
 int amem_memPause(pid_t pid, uint64_t tag)
 {
+  LOGGER(DEBUG, "memPause: start here."); 
   if (amem_plugin_disable > 0) {
     return 0;
   }
@@ -464,7 +495,7 @@ int amem_memPause(pid_t pid, uint64_t tag)
 
     size_t free_sz, total;
     cudaMemGetInfo(&free_sz, &total);
-    LOGGER(INFO, "groupID:%d pid:%d GPU:%d memUsed: %ld MB before paused", amem_groupID, getpid(), curDev, (total-free_sz)>>20); 
+    LOGGER(INFO, "memPause: groupID:%d pid:%d GPU:%d memUsed: %ld MB before paused", amem_groupID, getpid(), curDev, (total-free_sz)>>20); 
 
     // 1. Issue offload to cpu in background stream, for local memory only
     CUmemGenericAllocationHandle oldHandle;
@@ -472,18 +503,21 @@ int amem_memPause(pid_t pid, uint64_t tag)
       if ((value.state == AMEM_STATE_ALLOC) && !amem_fromPeer(value.type) && value.tags != AMEM_OFFLOAD_FREE_TAG) {
         value.state = AMEM_STATE_OFFLOADING;
         if(value.cpuAddr == NULL) { // note, allocHost may increase a bit GPU mem (~2MB)
+          LOGGER(DEBUG, "memPause: allocate host memory for %ld MB.", (value.allocSz)>>20); 
           amem_allocHost(&value.cpuAddr, value.allocSz);
-	}
-        amem_lauchOffload(value.cpuAddr, key, value.allocSz, gmm_ctx_p->offloadStream[curDev], value.evt, false);
+	    }
+        LOGGER(DEBUG, "memPause: Transfer device memory %ld MB form %llx to %p.", (value.allocSz)>>20, key, value.cpuAddr); 
+        amem_launchOffload(value.cpuAddr, key, value.allocSz, gmm_ctx_p->offloadStream[curDev], value.evt, false);
         gmm_ctx_p->offloadCnt++;
       }
     }
 
     // 2. Release handle if it's from peer, so that peer could continue handle release
-    // TODO: can we query the handle is from peer or local ???? instead of my mdata
+    // TODO: can we query the handle is from peer or local ???? instead of metadata
     for (auto& [key, value]: gmm_ctx_p->allocTable[curDev]) {
       //if ((value.state == AMEM_STATE_ALLOC) && amem_fromPeer(value.type) && !value.oosFlag) {
       if ((value.state == AMEM_STATE_ALLOC) && amem_fromPeer(value.type)) {
+        LOGGER(DEBUG, "memPause: release peer handle %llx.", key); 
         curet = amem_cuMemReleaseHandle((void*)key, 0);
         // no need to offload as data is owned by peer
         value.state = AMEM_STATE_HOLE;
@@ -506,8 +540,8 @@ int amem_memPause(pid_t pid, uint64_t tag)
         curet = CHECK_DRV(cuMemRelease(oldHandle));
 
         if (value.refcount > 0) {
-          LOGGER(DEBUG, "groupID:%d pid:%d dptr:%llx refcount:%d", amem_groupID, getpid(), key, value.refcount);
-	}
+          LOGGER(DEBUG, "memPause: groupID:%d pid:%d dptr:%llx refcount:%d", amem_groupID, getpid(), key, value.refcount);
+	    }
 
         curet = amem_cuMemReleaseHandle((void*)key, value.refcount);
         for (int i = 0; i < AMEM_MAX_DEVS; ++i) {
@@ -529,7 +563,7 @@ int amem_memPause(pid_t pid, uint64_t tag)
     auto t1  = std::chrono::steady_clock::now();
     auto duration =std::chrono::duration_cast<std::chrono::microseconds>(t1-t0).count();
     cudaMemGetInfo(&free_sz, &total);
-    LOGGER(INFO, "groupID:%d pid:%d GPU:%d pauseCnt:%ld memUsed:%ld MB after paused, released:%ld MB, duration:%ld ms" 
+    LOGGER(INFO, "memPause: pause results. groupID:%d pid:%d GPU:%d pauseCnt:%ld memUsed:%ld MB after paused, released:%ld MB, duration:%ld ms" 
 		  " offload:%d releaseLocal:%d releasePeer:%d", amem_groupID, getpid(), 
 		    thisDev, gmm_ctx_p->pauseCnt, (total-free_sz)>>20, releaseSz >> 20, duration/1000,
 		  gmm_ctx_p->offloadCnt, gmm_ctx_p->releaseLocalCnt, gmm_ctx_p->releaseShadowCnt); 
@@ -542,6 +576,7 @@ int amem_memPause(pid_t pid, uint64_t tag)
 // Handler for mem resume
 int amem_memResume(pid_t pid, uint64_t tag)
 {
+  LOGGER(DEBUG, "memResume: start here."); 
   if (amem_plugin_disable > 0) {
     return 0;
   }

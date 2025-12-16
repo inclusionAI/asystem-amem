@@ -7,3 +7,5 @@ lib/
 
 # editor file
 *.swp
+
+compile_commands.json

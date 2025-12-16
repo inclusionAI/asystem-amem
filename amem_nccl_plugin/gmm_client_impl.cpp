@@ -497,6 +497,8 @@ int gmm_client_ctx::register_peer(gmm_shmInfo_t *&shm, CUmemGenericAllocationHan
   }
   if (ret != 0) {
     LOGGER(WARN, "groupID:%d pid:%d peer_dev:%d conn:%d dptr:%llx send|recv error", amem_groupID, pid, peer_dev, worker_connects[peer_dev], dptr);
+  } else {
+    LOGGER(DEBUG, "GMM register_peer: Success. groupID:%d pid:%d peer_dev:%d conn:%d dptr:%llx send|recv error", amem_groupID, pid, peer_dev, worker_connects[peer_dev], dptr);
   }
 
   return ret;
