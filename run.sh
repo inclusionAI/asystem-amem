@@ -5,7 +5,7 @@ set -x
 LOCAL_NCCL_TEST_PATH=$(pwd)/third_party/nccl-tests
 LOCAL_NCCL_PATH=$(pwd)/third_party/nccl
 export PATH=/usr/local/cuda/bin:$MPI_HOME/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat/lib/:$MPI_HOME/lib:$LOCAL_NCCL_PATH/build/lib:$MPI_HOME/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$MPI_HOME/lib:$LOCAL_NCCL_PATH/build/lib:$LD_LIBRARY_PATH
 export GPU_NUM=8
 export LIVEPAUSE=1 
 
@@ -27,7 +27,6 @@ for test in ${TESTS}; do
     -npernode ${GPU_NUM} \
     -x LD_LIBRARY_PATH \
     -x PATH \
-    -x NCCL_SOCKET_IFNAME=eth0 \
     $LOCAL_NCCL_TEST_PATH/build/${test} -b 4M -e 8M -f 2 -g 1 -n 10
 
     if [ $? -ne 0 ]; then

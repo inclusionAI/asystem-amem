@@ -102,7 +102,8 @@ build_project() {
 
 clean_project() {
     cd $AMEM_ROOT_DIR;
-    rm -rf ./bin ./amem_nccl_plugin/*.o $THIRD_NCCL/build $THIRD_NCCL_TEST/build
+    echo "rm -rf $AMEM_ROOT_DIR/amem_nccl_plugin/*.o $THIRD_NCCL/build $THIRD_NCCL_TEST/build"
+    rm -rf $AMEM_ROOT_DIR/amem_nccl_plugin/*.o $THIRD_NCCL/build $THIRD_NCCL_TEST/build
 }
 
 if [ "$1" == "clean" ]; then
